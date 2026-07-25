@@ -104,6 +104,8 @@ def responder(prompt: str, motor: MotorRAG, asignatura: str, usuario, control=No
     st.session_state.messages.append({"role": "assistant", "content": contenido})
 
     # Tokens y costo
+    st.session_state.setdefault("total_tokens", 0)
+    st.session_state.setdefault("costo_total", 0.0)
     t_in = respuesta.usage_metadata.get("input_tokens", 0) if hasattr(respuesta, "usage_metadata") else 0
     t_out = respuesta.usage_metadata.get("output_tokens", 0) if hasattr(respuesta, "usage_metadata") else 0
     costo = (t_in * info_modelo["input_cost"] + t_out * info_modelo["output_cost"]) / 1000
