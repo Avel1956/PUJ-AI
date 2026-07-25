@@ -43,16 +43,16 @@ MODELOS_DISPONIBLES = {
         "output_cost": 0.015,
         "descripcion": "Claude Sonnet 4 — alta calidad, mayor costo",
     },
-    "deepseek-chat": {
+    "deepseek-v4-pro": {
         "provider": "deepseek",
-        "model_id": "deepseek-chat",
+        "model_id": "deepseek-v4-pro",
         "input_cost": 0.00014,
         "output_cost": 0.00028,
-        "descripcion": "DeepSeek V3 — alternativa directa, buen rendimiento/costo",
+        "descripcion": "DeepSeek V4 Pro — modelo principal, API directa",
     },
 }
 
-MODELO_POR_DEFECTO = "deepseek-chat"
+MODELO_POR_DEFECTO = "deepseek-v4-pro"
 MAX_PREGUNTAS_POR_DIA = 50
 COSTO_MAXIMO_SESION = 0.10  # USD
 
