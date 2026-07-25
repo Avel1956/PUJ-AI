@@ -197,6 +197,84 @@ CREATE POLICY "Admin ve logs" ON logs_sesiones
 CREATE POLICY "Sistema inserta logs" ON logs_sesiones
     FOR INSERT WITH CHECK (TRUE);
 
+-- ─── POLÍTICAS DELETE ───
+-- Admin puede borrar cualquier perfil (excepto a sí mismo)
+CREATE POLICY "Admin borra perfiles" ON profiles
+    FOR DELETE USING (EXISTS (
+        SELECT 1 FROM profiles WHERE id = auth.uid() AND rol = 'admin'
+    ) AND id != auth.uid());
+
+-- Docente borra sus propios grupos, admin borra cualquier grupo
+CREATE POLICY "Docente borra sus grupos" ON grupos
+    FOR DELETE USING (creado_por = auth.uid());
+CREATE POLICY "Admin borra grupos" ON grupos
+    FOR DELETE USING (EXISTS (
+        SELECT 1 FROM profiles WHERE id = auth.uid() AND rol = 'admin'
+    ));
+
+-- Miembros de grupo (cascada implícita al borrar grupo; políticas explícitas)
+CREATE POLICY "Docente borra miembros de sus grupos" ON grupos_estudiantes
+    FOR DELETE USING (EXISTS (
+        SELECT 1 FROM grupos g WHERE g.id = grupos_estudiantes.grupo_id AND g.creado_por = auth.uid()
+    ));
+CREATE POLICY "Admin borra miembros de grupos" ON grupos_estudiantes
+    FOR DELETE USING (EXISTS (
+        SELECT 1 FROM profiles WHERE id = auth.uid() AND rol = 'admin'
+    ));
+
+-- Conversaciones: estudiante borra las suyas, docente borra las de sus grupos, admin todas
+CREATE POLICY "Estudiante borra sus conversaciones" ON conversaciones
+    FOR DELETE USING (estudiante_id = auth.uid());
+CREATE POLICY "Docente borra conversaciones de sus grupos" ON conversaciones
+    FOR DELETE USING (EXISTS (
+        SELECT 1 FROM grupos g
+        JOIN grupos_estudiantes ge ON ge.grupo_id = g.id
+        WHERE g.creado_por = auth.uid()
+        AND ge.estudiante_id = conversaciones.estudiante_id
+    ));
+CREATE POLICY "Admin borra conversaciones" ON conversaciones
+    FOR DELETE USING (EXISTS (
+        SELECT 1 FROM profiles WHERE id = auth.uid() AND rol = 'admin'
+    ));
+
+-- Mensajes: igual que conversaciones
+CREATE POLICY "Estudiante borra sus mensajes" ON mensajes
+    FOR DELETE USING (EXISTS (
+        SELECT 1 FROM conversaciones c WHERE c.id = mensajes.conversacion_id AND c.estudiante_id = auth.uid()
+    ));
+CREATE POLICY "Docente borra mensajes de sus estudiantes" ON mensajes
+    FOR DELETE USING (EXISTS (
+        SELECT 1 FROM conversaciones c
+        JOIN grupos g ON g.id = c.grupo_id
+        WHERE c.id = mensajes.conversacion_id AND g.creado_por = auth.uid()
+    ));
+CREATE POLICY "Admin borra mensajes" ON mensajes
+    FOR DELETE USING (EXISTS (
+        SELECT 1 FROM profiles WHERE id = auth.uid() AND rol = 'admin'
+    ));
+
+-- Mensajes docente: remitente los borra, estudiante los borra de su bandeja, admin todos
+CREATE POLICY "Remitente borra su mensaje" ON mensajes_docente
+    FOR DELETE USING (de_usuario_id = auth.uid());
+CREATE POLICY "Estudiante borra mensaje recibido" ON mensajes_docente
+    FOR DELETE USING (para_estudiante_id = auth.uid());
+CREATE POLICY "Admin borra mensajes docentes" ON mensajes_docente
+    FOR DELETE USING (EXISTS (
+        SELECT 1 FROM profiles WHERE id = auth.uid() AND rol = 'admin'
+    ));
+
+-- Logs: solo admin
+CREATE POLICY "Admin borra logs" ON logs_sesiones
+    FOR DELETE USING (EXISTS (
+        SELECT 1 FROM profiles WHERE id = auth.uid() AND rol = 'admin'
+    ));
+
+-- Config sistema: solo admin
+CREATE POLICY "Admin borra config" ON config_sistema
+    FOR DELETE USING (EXISTS (
+        SELECT 1 FROM profiles WHERE id = auth.uid() AND rol = 'admin'
+    ));
+
 -- 10. TRIGGER — auto-crear perfil al registrarse en auth.users
 CREATE OR REPLACE FUNCTION public.handle_new_user()
 RETURNS TRIGGER AS $$

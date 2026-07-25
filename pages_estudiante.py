@@ -294,6 +294,12 @@ def _tab_historial(usuario):
                     st.caption(f"{rol} {m['created_at'][:19]}")
                     st.markdown(m["contenido"][:500])
                     st.divider()
+            if st.button("🗑️ Eliminar conversación", key=f"del_conv_{conv['id']}", type="secondary"):
+                _confirmar_y_borrar(
+                    f"¿Eliminar conversación '{conv['titulo']}'?",
+                    lambda cid=conv["id"]: _borrar_conversacion(cid),
+                    f"really_del_conv_{conv['id']}",
+                )
 
 
 # ============================================================
@@ -336,6 +342,12 @@ def _tab_bandeja(usuario):
         no_leido = "🔵" if not msg["leido"] else "⚪"
         with st.expander(f"{no_leido} {msg['asunto']} — {msg['created_at'][:19]}"):
             st.markdown(msg["contenido"])
+            if st.button("🗑️ Eliminar mensaje", key=f"del_bandeja_{msg['id']}", type="secondary"):
+                _confirmar_y_borrar(
+                    f"¿Eliminar mensaje '{msg['asunto']}'?",
+                    lambda mid=msg["id"]: _borrar_mensaje_docente(mid),
+                    f"really_del_bandeja_{msg['id']}",
+                )
 
 
 # ============================================================
@@ -417,3 +429,37 @@ def _guardar_mensaje_db(usuario, contenido: str, t_in: int, t_out: int,
             }).execute()
     except Exception:
         pass
+
+
+# ============================================================
+# Helpers de borrado
+# ============================================================
+def _confirmar_y_borrar(mensaje: str, accion, confirm_key: str):
+    """Confirmación en 2 pasos antes de borrar."""
+    if confirm_key not in st.session_state:
+        st.session_state[confirm_key] = False
+    if not st.session_state[confirm_key]:
+        st.warning(mensaje)
+        if st.button("⚠️ Sí, eliminar definitivamente", key=f"confirm_{confirm_key}", type="secondary"):
+            st.session_state[confirm_key] = True
+            st.rerun()
+    else:
+        try:
+            accion()
+            st.success("Eliminado correctamente.")
+            del st.session_state[confirm_key]
+            st.rerun()
+        except Exception as e:
+            st.error(f"Error al eliminar: {e}")
+            del st.session_state[confirm_key]
+
+
+def _borrar_conversacion(conv_id: str):
+    supabase = get_supabase()
+    supabase.table("mensajes").delete().eq("conversacion_id", conv_id).execute()
+    supabase.table("conversaciones").delete().eq("id", conv_id).execute()
+
+
+def _borrar_mensaje_docente(msg_id: str):
+    supabase = get_supabase()
+    supabase.table("mensajes_docente").delete().eq("id", msg_id).execute()

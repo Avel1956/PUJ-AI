@@ -45,6 +45,7 @@ def _tab_estudiantes(usuario):
                 ok, msg = crear_usuario_estudiante(email, password, nombre)
                 if ok:
                     st.success(msg)
+                    st.rerun()
                 else:
                     st.error(msg)
             else:
@@ -65,22 +66,23 @@ def _tab_estudiantes(usuario):
         st.info("No hay estudiantes registrados aún.")
         return
 
-    # Tabla
-    rows = []
     for p in resp.data:
-        rows.append({
-            "Nombre": p["nombre"],
-            "Email": p["email"],
-            "Registrado": p["created_at"][:10] if p["created_at"] else "",
-            "ID": p["id"],
-        })
+        # Contar conversaciones
+        convs_resp = (
+            supabase.table("conversaciones")
+            .select("id", count="exact")
+            .eq("estudiante_id", p["id"])
+            .execute()
+        )
+        n_convs = convs_resp.count if hasattr(convs_resp, "count") else 0
 
-    st.dataframe(
-        rows,
-        column_config={"ID": None},
-        hide_index=True,
-        use_container_width=True,
-    )
+        with st.expander(f"🧑 {p['nombre']} — {p['email']} — {n_convs} conversaciones"):
+            st.caption(f"Registrado: {p.get('created_at', '?')}")
+            # Ver conversaciones de este estudiante
+            if st.button("📊 Ver conversaciones", key=f"ver_conv_est_{p['id']}"):
+                st.session_state._tracking_estudiante = p["id"]
+                st.session_state._tracking_nombre = p["nombre"]
+                st.rerun()
 
 
 # ============================================================
@@ -108,9 +110,7 @@ def _tab_grupos(usuario):
         with col2:
             asignatura_grp = st.text_input("Asignatura", key="nuevo_grupo_asignatura",
                                            placeholder="ej: mecanica-newtoniana")
-
         desc_grp = st.text_area("Descripción", key="nuevo_grupo_desc")
-
         miembros_sel = st.multiselect(
             "Miembros del grupo",
             options=list(mapa_estudiantes.keys()),
@@ -119,17 +119,14 @@ def _tab_grupos(usuario):
 
         if st.button("Crear grupo", type="primary"):
             if nombre_grp and miembros_sel:
-                # Crear grupo
                 resp = supabase.table("grupos").insert({
                     "nombre": nombre_grp,
                     "descripcion": desc_grp,
                     "creado_por": usuario.id,
                     "asignatura": asignatura_grp,
                 }).execute()
-
                 if resp.data:
                     grupo_id = resp.data[0]["id"]
-                    # Asignar miembros
                     for nombre_m in miembros_sel:
                         est = mapa_estudiantes[nombre_m]
                         try:
@@ -138,7 +135,7 @@ def _tab_grupos(usuario):
                                 "estudiante_id": est["id"],
                             }).execute()
                         except Exception:
-                            pass  # Ya existe
+                            pass
                     st.success(f"Grupo '{nombre_grp}' creado con {len(miembros_sel)} miembros.")
                     st.rerun()
             else:
@@ -159,7 +156,6 @@ def _tab_grupos(usuario):
         return
 
     for g in grupos_resp.data:
-        # Contar miembros
         miembros_resp = (
             supabase.table("grupos_estudiantes")
             .select("estudiante_id, profiles!estudiante_id(nombre, email)")
@@ -168,16 +164,39 @@ def _tab_grupos(usuario):
         )
         miembros = [m.get("profiles", {}) for m in (miembros_resp.data or [])]
         nombres_m = [m.get("nombre", "?") for m in miembros if isinstance(m, dict)]
+        ids_m = [m.get("estudiante_id", "") for m in (miembros_resp.data or [])]
 
         with st.expander(f"📁 {g['nombre']} — {g.get('asignatura', 'sin asignatura')} ({len(nombres_m)} miembros)"):
             st.caption(g.get("descripcion", ""))
             st.markdown("**Miembros:** " + ", ".join(nombres_m))
 
-            # Ver conversaciones del grupo
-            if st.button(f"📊 Ver conversaciones", key=f"ver_conv_grupo_{g['id']}"):
-                st.session_state._tracking_grupo = g["id"]
-                st.session_state._tracking_tipo = "grupo"
-                st.rerun()
+            col1, col2, col3 = st.columns(3)
+            with col1:
+                if st.button("📊 Ver conversaciones", key=f"ver_conv_grp_{g['id']}"):
+                    st.session_state._tracking_grupo = g["id"]
+                    st.session_state._tracking_tipo = "grupo"
+                    st.rerun()
+
+            with col3:
+                if st.button("🗑️ Eliminar grupo", key=f"del_grp_{g['id']}", type="secondary"):
+                    _confirmar_y_borrar(
+                        f"¿Eliminar el grupo '{g['nombre']}' y desvincular a {len(nombres_m)} miembros?",
+                        lambda gid=g["id"]: _borrar_grupo(gid),
+                        f"really_del_grp_{g['id']}",
+                    )
+
+            # Quitar miembro individual
+            if len(ids_m) > 0:
+                quitar = st.selectbox("Quitar miembro", [""] + nombres_m, key=f"quitar_miembro_{g['id']}", label_visibility="collapsed", placeholder="Quitar miembro...")
+                if quitar and st.button("✖️ Quitar", key=f"btn_quitar_{g['id']}"):
+                    idx = nombres_m.index(quitar)
+                    est_id = ids_m[idx]
+                    try:
+                        supabase.table("grupos_estudiantes").delete().eq("grupo_id", g["id"]).eq("estudiante_id", est_id).execute()
+                        st.success(f"{quitar} removido del grupo.")
+                        st.rerun()
+                    except Exception as e:
+                        st.error(f"Error: {e}")
 
 
 # ============================================================
@@ -199,18 +218,23 @@ def _tab_tracking(usuario):
         )
         mapa_est = {p["nombre"]: p["id"] for p in (estudiantes.data or [])}
 
+        # Si venimos de un botón "ver conversaciones"
+        default_idx = 0
+        if "_tracking_estudiante" in st.session_state:
+            nombre_track = st.session_state.get("_tracking_nombre", "")
+            if nombre_track in mapa_est:
+                default_idx = list(mapa_est.keys()).index(nombre_track) + 1
+            del st.session_state._tracking_estudiante
+            del st.session_state._tracking_nombre
+
         estudiante_sel = st.selectbox(
             "Seleccionar estudiante",
             options=["(Todos)"] + list(mapa_est.keys()),
+            index=default_idx,
             key="tracking_estudiante",
         )
     with col2:
-        # Obtener asignaturas únicas de las conversaciones
-        asignaturas_resp = (
-            supabase.table("conversaciones")
-            .select("asignatura")
-            .execute()
-        )
+        asignaturas_resp = supabase.table("conversaciones").select("asignatura").execute()
         asigs = sorted(set(
             c["asignatura"] for c in (asignaturas_resp.data or []) if c["asignatura"]
         ))
@@ -234,7 +258,6 @@ def _tab_tracking(usuario):
         return
 
     for conv in convs_resp.data:
-        # Nombre del estudiante
         perfil_resp = (
             supabase.table("profiles")
             .select("nombre")
@@ -244,24 +267,17 @@ def _tab_tracking(usuario):
         )
         nombre_est = perfil_resp.data["nombre"] if perfil_resp.data else "?"
 
-        # Contar mensajes
         count_resp = (
             supabase.table("mensajes")
             .select("id", count="exact")
             .eq("conversacion_id", conv["id"])
             .execute()
         )
-        n_mensajes = count_resp.count if hasattr(count_resp, "count") else "?"
+        n_mensajes = count_resp.count if hasattr(count_resp, "count") else 0
 
         grupo_info = ""
         if conv.get("grupo_id"):
-            g_resp = (
-                supabase.table("grupos")
-                .select("nombre")
-                .eq("id", conv["grupo_id"])
-                .single()
-                .execute()
-            )
+            g_resp = supabase.table("grupos").select("nombre").eq("id", conv["grupo_id"]).single().execute()
             if g_resp.data:
                 grupo_info = f" — Grupo: {g_resp.data['nombre']}"
 
@@ -283,14 +299,22 @@ def _tab_tracking(usuario):
                     st.markdown(m["contenido"][:600])
                     st.divider()
 
-            # Botón para enviar mensaje al estudiante
-            if st.button(f"📨 Enviar mensaje a {nombre_est}", key=f"msg_{conv['id']}"):
-                st.session_state._mensaje_para = {
-                    "estudiante_id": conv["estudiante_id"],
-                    "estudiante_nombre": nombre_est,
-                    "grupo_id": conv.get("grupo_id"),
-                }
-                st.rerun()
+            col1, col2 = st.columns(2)
+            with col1:
+                if st.button(f"📨 Enviar mensaje a {nombre_est}", key=f"msg_{conv['id']}"):
+                    st.session_state._mensaje_para = {
+                        "estudiante_id": conv["estudiante_id"],
+                        "estudiante_nombre": nombre_est,
+                        "grupo_id": conv.get("grupo_id"),
+                    }
+                    st.rerun()
+            with col2:
+                if st.button("🗑️ Eliminar conversación", key=f"del_conv_{conv['id']}", type="secondary"):
+                    _confirmar_y_borrar(
+                        f"¿Eliminar conversación de {nombre_est} ({conv['asignatura']}, {n_mensajes} mensajes)?",
+                        lambda cid=conv["id"]: _borrar_conversacion(cid),
+                        f"really_del_conv_{conv['id']}",
+                    )
 
 
 # ============================================================
@@ -300,7 +324,12 @@ def _tab_mensajes(usuario):
     st.subheader("📬 Enviar mensaje a estudiantes/grupos")
     supabase = get_supabase()
 
-    # Destinatario
+    # Si venimos de un botón "enviar mensaje"
+    if "_mensaje_para" in st.session_state:
+        info = st.session_state._mensaje_para
+        st.info(f"📨 Redactando mensaje para **{info['estudiante_nombre']}**")
+        del st.session_state._mensaje_para
+
     destino_tipo = st.radio("Enviar a:", ["Estudiante individual", "Grupo"], horizontal=True)
 
     col1, col2 = st.columns(2)
@@ -314,11 +343,7 @@ def _tab_mensajes(usuario):
                 .execute()
             )
             mapa_est = {p["nombre"]: p for p in (estudiantes.data or [])}
-            destino_sel = st.selectbox(
-                "Estudiante",
-                options=list(mapa_est.keys()),
-                key="msg_destino_estudiante",
-            )
+            destino_sel = st.selectbox("Estudiante", options=list(mapa_est.keys()), key="msg_destino_estudiante")
             estudiante_id = mapa_est[destino_sel]["id"] if destino_sel in mapa_est else None
             grupo_id = None
         else:
@@ -330,11 +355,7 @@ def _tab_mensajes(usuario):
                 .execute()
             )
             mapa_grp = {g["nombre"]: g for g in (grupos.data or [])}
-            destino_sel = st.selectbox(
-                "Grupo",
-                options=list(mapa_grp.keys()),
-                key="msg_destino_grupo",
-            )
+            destino_sel = st.selectbox("Grupo", options=list(mapa_grp.keys()), key="msg_destino_grupo")
             grupo_id = mapa_grp[destino_sel]["id"] if destino_sel in mapa_grp else None
             estudiante_id = None
 
@@ -375,25 +396,65 @@ def _tab_mensajes(usuario):
         return
 
     for msg in enviados.data:
-        destino_nombre = ""
-        if msg.get("para_estudiante_id"):
-            p_resp = (
-                supabase.table("profiles")
-                .select("nombre")
-                .eq("id", msg["para_estudiante_id"])
-                .single()
-                .execute()
-            )
-            destino_nombre = p_resp.data["nombre"] if p_resp.data else "?"
-        elif msg.get("para_grupo_id"):
-            g_resp = (
-                supabase.table("grupos")
-                .select("nombre")
-                .eq("id", msg["para_grupo_id"])
-                .single()
-                .execute()
-            )
-            destino_nombre = f"Grupo: {g_resp.data['nombre']}" if g_resp.data else "?"
+        destino_nombre = _nombre_destino(msg, supabase)
 
         with st.expander(f"📨 {msg['asunto']} → {destino_nombre} — {msg['created_at'][:19]}"):
             st.markdown(msg["contenido"])
+            if st.button("🗑️ Eliminar mensaje", key=f"del_msg_{msg['id']}", type="secondary"):
+                _confirmar_y_borrar(
+                    f"¿Eliminar mensaje '{msg['asunto']}' enviado a {destino_nombre}?",
+                    lambda mid=msg["id"]: _borrar_mensaje_docente(mid),
+                    f"really_del_msg_{msg['id']}",
+                )
+
+
+# ============================================================
+# Helpers
+# ============================================================
+def _confirmar_y_borrar(mensaje: str, accion, confirm_key: str):
+    """Confirmación en 2 pasos antes de borrar."""
+    if confirm_key not in st.session_state:
+        st.session_state[confirm_key] = False
+    if not st.session_state[confirm_key]:
+        st.warning(mensaje)
+        if st.button("⚠️ Sí, eliminar definitivamente", key=f"confirm_{confirm_key}", type="secondary"):
+            st.session_state[confirm_key] = True
+            st.rerun()
+    else:
+        try:
+            accion()
+            st.success("Eliminado correctamente.")
+            del st.session_state[confirm_key]
+            st.rerun()
+        except Exception as e:
+            st.error(f"Error al eliminar: {e}")
+            del st.session_state[confirm_key]
+
+
+def _borrar_grupo(grupo_id: str):
+    supabase = get_supabase()
+    # Borrar miembros del grupo
+    supabase.table("grupos_estudiantes").delete().eq("grupo_id", grupo_id).execute()
+    # Borrar el grupo
+    supabase.table("grupos").delete().eq("id", grupo_id).execute()
+
+
+def _borrar_conversacion(conv_id: str):
+    supabase = get_supabase()
+    supabase.table("mensajes").delete().eq("conversacion_id", conv_id).execute()
+    supabase.table("conversaciones").delete().eq("id", conv_id).execute()
+
+
+def _borrar_mensaje_docente(msg_id: str):
+    supabase = get_supabase()
+    supabase.table("mensajes_docente").delete().eq("id", msg_id).execute()
+
+
+def _nombre_destino(msg, supabase) -> str:
+    if msg.get("para_estudiante_id"):
+        p_resp = supabase.table("profiles").select("nombre").eq("id", msg["para_estudiante_id"]).single().execute()
+        return p_resp.data["nombre"] if p_resp.data else "?"
+    if msg.get("para_grupo_id"):
+        g_resp = supabase.table("grupos").select("nombre").eq("id", msg["para_grupo_id"]).single().execute()
+        return f"Grupo: {g_resp.data['nombre']}" if g_resp.data else "?"
+    return "?"
