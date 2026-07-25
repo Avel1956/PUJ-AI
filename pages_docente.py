@@ -108,11 +108,13 @@ def _tab_estudiantes(usuario):
                     _ofrecer_descarga(jsonl, f"conversaciones_{p['nombre'].replace(' ', '_')}.jsonl")
             with col3:
                 if st.button("🗑️ Eliminar", key=f"del_est_{p['id']}", type="secondary"):
-                    _confirmar_y_borrar(
-                        f"¿Eliminar a {p['nombre']} y todas sus conversaciones?",
-                        lambda pid=p["id"]: _borrar_estudiante(pid),
-                        f"really_del_est_{p['id']}",
-                    )
+                    st.session_state[f"cf_doc_est_{p['id']}"] = True
+                    st.rerun()
+                _confirmar_y_borrar(
+                    f"cf_doc_est_{p['id']}",
+                    f"¿Eliminar a {p['nombre']} y todas sus conversaciones?",
+                    lambda pid=p["id"]: _borrar_estudiante(pid),
+                )
 
 
 # ============================================================
@@ -213,11 +215,13 @@ def _tab_grupos(usuario):
                     _ofrecer_descarga(jsonl, f"grupo_{g['nombre'].replace(' ', '_')}.jsonl")
             with col3:
                 if st.button("🗑️ Eliminar grupo", key=f"del_grp_{g['id']}", type="secondary"):
-                    _confirmar_y_borrar(
-                        f"¿Eliminar el grupo '{g['nombre']}' y desvincular a {len(nombres_m)} miembros?",
-                        lambda gid=g["id"]: _borrar_grupo(gid),
-                        f"really_del_grp_{g['id']}",
-                    )
+                    st.session_state[f"cf_doc_grp_{g['id']}"] = True
+                    st.rerun()
+                _confirmar_y_borrar(
+                    f"cf_doc_grp_{g['id']}",
+                    f"¿Eliminar el grupo '{g['nombre']}' y desvincular a {len(nombres_m)} miembros?",
+                    lambda gid=g["id"]: _borrar_grupo(gid),
+                )
 
             # Quitar miembro
             if len(ids_m) > 0:
@@ -365,11 +369,13 @@ def _tab_tracking(usuario):
                 _ofrecer_descarga(jsonl_conv, f"conv_{conv['id'][:8]}.jsonl", label=f"📥 JSONL")
             with col3:
                 if st.button("🗑️ Eliminar conversación", key=f"del_conv_{conv['id']}", type="secondary"):
-                    _confirmar_y_borrar(
-                        f"¿Eliminar conversación de {nombre_est} ({conv['asignatura']}, {n_mensajes} mensajes)?",
-                        lambda cid=conv["id"]: _borrar_conversacion(cid),
-                        f"really_del_conv_{conv['id']}",
-                    )
+                    st.session_state[f"cf_doc_conv_{conv['id']}"] = True
+                    st.rerun()
+                _confirmar_y_borrar(
+                    f"cf_doc_conv_{conv['id']}",
+                    f"¿Eliminar conversación de {nombre_est} ({conv['asignatura']}, {n_mensajes} mensajes)?",
+                    lambda cid=conv["id"]: _borrar_conversacion(cid),
+                )
 
 
 # ============================================================
@@ -455,14 +461,16 @@ def _tab_mensajes(usuario):
         with st.expander(f"📨 {msg['asunto']} → {destino_nombre} — {msg['created_at'][:19]}"):
             st.markdown(msg["contenido"])
             if st.button("🗑️ Eliminar mensaje", key=f"del_msg_{msg['id']}", type="secondary"):
-                _confirmar_y_borrar(
-                    f"¿Eliminar mensaje '{msg['asunto']}' enviado a {destino_nombre}?",
-                    lambda mid=msg["id"]: _borrar_mensaje_docente(mid),
-                    f"really_del_msg_{msg['id']}",
-                )
+                st.session_state[f"cf_doc_msg_{msg['id']}"] = True
+                st.rerun()
+            _confirmar_y_borrar(
+                f"cf_doc_msg_{msg['id']}",
+                f"¿Eliminar mensaje '{msg['asunto']}' enviado a {destino_nombre}?",
+                lambda mid=msg["id"]: _borrar_mensaje_docente(mid),
+            )
 
 
-# ============================================================
+
 # Tab: Descargas (JSONL)
 # ============================================================
 def _tab_descargas(usuario):
@@ -774,24 +782,31 @@ def _ofrecer_descarga(jsonl: str, filename: str, label: str = "📥 Descargar"):
 
 # ============================================================
 # CRUD Helpers
-# ============================================================
-def _confirmar_y_borrar(mensaje: str, accion, confirm_key: str):
-    if confirm_key not in st.session_state:
-        st.session_state[confirm_key] = False
-    if not st.session_state[confirm_key]:
+def _confirmar_y_borrar(confirm_key: str, mensaje: str, accion):
+    """Confirmación 2 pasos. LLAMAR INCONDICIONALMENTE, no dentro de if st.button."""
+    state = st.session_state.get(confirm_key, None)
+    if state is None:
+        return
+    if state is True:
         st.warning(mensaje)
-        if st.button("⚠️ Sí, eliminar definitivamente", key=f"confirm_{confirm_key}", type="secondary"):
-            st.session_state[confirm_key] = True
-            st.rerun()
-    else:
+        c1, c2 = st.columns(2)
+        with c1:
+            if st.button("⚠️ Sí, eliminar", key=f"{confirm_key}_yes"):
+                st.session_state[confirm_key] = "execute"
+                st.rerun()
+        with c2:
+            if st.button("Cancelar", key=f"{confirm_key}_no"):
+                del st.session_state[confirm_key]
+                st.rerun()
+    elif state == "execute":
         try:
             accion()
             st.success("Eliminado correctamente.")
-            del st.session_state[confirm_key]
-            st.rerun()
         except Exception as e:
             st.error(f"Error al eliminar: {e}")
+        finally:
             del st.session_state[confirm_key]
+            st.rerun()
 
 
 def _borrar_grupo(grupo_id: str):

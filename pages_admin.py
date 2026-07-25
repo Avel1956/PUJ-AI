@@ -83,11 +83,13 @@ def _tab_docentes():
             st.caption(f"ID: {p['id']}")
             st.caption(f"Registrado: {p.get('created_at', '?')}")
             if st.button("🗑️ Eliminar docente", key=f"del_doc_{p['id']}", type="secondary"):
-                _confirmar_y_borrar(
-                    f"¿Eliminar a {p['nombre']}? Se perderán sus grupos y mensajes.",
-                    lambda pid=p["id"]: _borrar_perfil(pid, "docente"),
-                    f"really_del_doc_{p['id']}",
-                )
+                st.session_state[f"cf_adm_doc_{p['id']}"] = True
+                st.rerun()
+            _confirmar_y_borrar(
+                f"cf_adm_doc_{p['id']}",
+                f"¿Eliminar a {p['nombre']}? Se perderán sus grupos y mensajes.",
+                lambda pid=p["id"]: _borrar_perfil(pid, "docente"),
+            )
 
 
 # ============================================================
@@ -124,11 +126,13 @@ def _tab_estudiantes():
         with st.expander(f"🧑 {p['nombre']} — {p['email']} — {n_convs} conversaciones"):
             st.caption(f"Registrado: {p.get('created_at', '?')}")
             if st.button("🗑️ Eliminar estudiante", key=f"del_est_{p['id']}", type="secondary"):
-                _confirmar_y_borrar(
-                    f"¿Eliminar a {p['nombre']} y todas sus conversaciones?",
-                    lambda pid=p["id"]: _borrar_perfil(pid, "estudiante"),
-                    f"really_del_est_{p['id']}",
-                )
+                st.session_state[f"cf_adm_est_{p['id']}"] = True
+                st.rerun()
+            _confirmar_y_borrar(
+                f"cf_adm_est_{p['id']}",
+                f"¿Eliminar a {p['nombre']} y todas sus conversaciones?",
+                lambda pid=p["id"]: _borrar_perfil(pid, "estudiante"),
+            )
 
 
 # ============================================================
@@ -323,11 +327,13 @@ def _tab_datos():
         if asigs:
             asig_sel = st.selectbox("Asignatura a limpiar", asigs, key="admin_asig_clean")
             if st.button("🗑️ Borrar TODAS las conversaciones de esta asignatura", key="btn_clean_asig", type="secondary"):
-                _confirmar_y_borrar(
-                    f"¿Eliminar TODAS las conversaciones de {asig_sel}?",
-                    lambda: _borrar_asignatura(asig_sel),
-                    "really_clean_asig",
-                )
+                st.session_state["cf_adm_asig"] = True
+                st.rerun()
+            _confirmar_y_borrar(
+                "cf_adm_asig",
+                f"¿Eliminar TODAS las conversaciones de {asig_sel}?",
+                lambda: _borrar_asignatura(asig_sel),
+            )
         else:
             st.info("No hay asignaturas con conversaciones.")
 
@@ -356,24 +362,31 @@ def _tab_datos():
 # ============================================================
 # Helpers
 # ============================================================
-def _confirmar_y_borrar(mensaje: str, accion, confirm_key: str):
-    """Confirmación en 2 pasos antes de borrar."""
-    if confirm_key not in st.session_state:
-        st.session_state[confirm_key] = False
-    if not st.session_state[confirm_key]:
+def _confirmar_y_borrar(confirm_key: str, mensaje: str, accion):
+    """Confirmación 2 pasos. LLAMAR INCONDICIONALMENTE, no dentro de if st.button."""
+    state = st.session_state.get(confirm_key, None)
+    if state is None:
+        return
+    if state is True:
         st.warning(mensaje)
-        if st.button("⚠️ Sí, eliminar definitivamente", key=f"confirm_{confirm_key}", type="secondary"):
-            st.session_state[confirm_key] = True
-            st.rerun()
-    else:
+        c1, c2 = st.columns(2)
+        with c1:
+            if st.button("⚠️ Sí, eliminar", key=f"{confirm_key}_yes"):
+                st.session_state[confirm_key] = "execute"
+                st.rerun()
+        with c2:
+            if st.button("Cancelar", key=f"{confirm_key}_no"):
+                del st.session_state[confirm_key]
+                st.rerun()
+    elif state == "execute":
         try:
             accion()
             st.success("Eliminado correctamente.")
-            del st.session_state[confirm_key]
-            st.rerun()
         except Exception as e:
             st.error(f"Error al eliminar: {e}")
+        finally:
             del st.session_state[confirm_key]
+            st.rerun()
 
 
 def _borrar_perfil(perfil_id: str, rol: str):
