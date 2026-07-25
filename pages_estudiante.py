@@ -140,118 +140,59 @@ def _tab_chat(usuario):
         return
 
     if prompt := st.chat_input("Escribe tu pregunta...", key="chat_input_estudiante"):
-        control.registrar()
+        # --- DIAGNÓSTICO: versión mínima ---
         st.session_state.messages.append({"role": "user", "content": prompt})
-
         with st.chat_message("user"):
             st.markdown(prompt)
 
         with st.chat_message("assistant"):
-            _procesar_respuesta(prompt, motor, asignatura, usuario)
-
-
-def _procesar_respuesta(prompt: str, motor: MotorRAG, asignatura: str, usuario):
-    """Procesa la pregunta del estudiante con RAG + LLM."""
-    try:
-        _procesar_respuesta_interna(prompt, motor, asignatura, usuario)
-    except Exception as e:
-        st.error(f"Error inesperado: {e}")
-        import traceback
-        with st.expander("🔍 Detalles técnicos"):
-            st.code(traceback.format_exc())
-
-
-def _procesar_respuesta_interna(prompt: str, motor: MotorRAG, asignatura: str, usuario):
-    modelo_nombre = _get_modelo_activo()
-    info_modelo = MODELOS_DISPONIBLES.get(modelo_nombre, MODELOS_DISPONIBLES[MODELO_POR_DEFECTO])
-
-    # Configurar LLM según provider
-    if info_modelo["provider"] == "openrouter":
-        api_key = st.secrets["OPENROUTER_API_KEY"]
-        base_url = "https://openrouter.ai/api/v1"
-        default_headers = {
-            "HTTP-Referer": "https://tutor-socratico.streamlit.app",
-            "X-Title": "Tutor Socrático",
-        }
-    else:  # deepseek
-        api_key = st.secrets["DEEPSEEK_API_KEY"]
-        base_url = "https://api.deepseek.com"
-        default_headers = None
-
-    llm = ChatOpenAI(
-        model=info_modelo["model_id"],
-        api_key=api_key,
-        base_url=base_url,
-        temperature=0.7,
-        max_tokens=2048,
-        default_headers=default_headers,
-    )
-
-    # Recuperar contexto
-    fragmentos = motor.recuperar(prompt, k=4) if motor.esta_listo() else []
-    contexto = "\n\n---\n\n".join(fragmentos) if fragmentos else ""
-
-    # Construir mensajes
-    system_prompt = construir_prompt_completo(asignatura)
-    if contexto:
-        system_prompt += f"\n\n## Documentos relevantes del curso:\n\n{contexto}"
-
-    mensajes = [SystemMessage(content=system_prompt)]
-    for msg in st.session_state.messages:
-        if msg["role"] == "user":
-            mensajes.append(HumanMessage(content=msg["content"]))
-        elif msg["role"] == "assistant":
-            mensajes.append(AIMessage(content=msg["content"]))
-
-    # Status con pasos de razonamiento
-    placeholder = st.empty()
-    with placeholder:
-        with st.status("🧠 Razonando...", expanded=True) as status:
-            if fragmentos:
-                st.write(f"📖 Recuperados {len(fragmentos)} fragmentos del curso")
-            st.write("💭 Generando respuesta...")
-            t0 = time.time()
-
             try:
-                respuesta = llm.invoke(mensajes)
+                st.write("🔍 **Paso 1:** prompt recibido correctamente.")
+                
+                # Paso 2: verificar modelo activo
+                modelo_nombre = _get_modelo_activo()
+                info_modelo = MODELOS_DISPONIBLES.get(modelo_nombre, MODELOS_DISPONIBLES[MODELO_POR_DEFECTO])
+                st.write(f"🔍 **Paso 2:** modelo = `{modelo_nombre}`, provider = `{info_modelo['provider']}`")
+
+                # Paso 3: configurar LLM
+                if info_modelo["provider"] == "openrouter":
+                    api_key = st.secrets["OPENROUTER_API_KEY"]
+                    base_url = "https://openrouter.ai/api/v1"
+                    default_headers = {"HTTP-Referer": "https://tutor-socratico.streamlit.app", "X-Title": "Tutor Socrático"}
+                else:
+                    api_key = st.secrets["DEEPSEEK_API_KEY"]
+                    base_url = "https://api.deepseek.com"
+                    default_headers = None
+                st.write(f"🔍 **Paso 3:** base_url = `{base_url}`, key configurada = `{'sí' if api_key else 'no'}`")
+
+                llm = ChatOpenAI(
+                    model=info_modelo["model_id"],
+                    api_key=api_key,
+                    base_url=base_url,
+                    temperature=0.7,
+                    max_tokens=512,
+                    default_headers=default_headers,
+                )
+                st.write(f"🔍 **Paso 4:** ChatOpenAI construido, model_id = `{info_modelo['model_id']}`")
+
+                # Paso 5: llamada simple
+                st.write("🔍 **Paso 5:** enviando prompt al LLM...")
+                respuesta = llm.invoke([HumanMessage(content=prompt)])
+                
+                contenido = respuesta.content if hasattr(respuesta, "content") else str(respuesta)
+                st.write(f"🔍 **Paso 6:** respuesta recibida ({len(contenido)} chars)")
+                
+                st.session_state.messages.append({"role": "assistant", "content": contenido})
+                
             except Exception as e:
-                status.update(label="❌ Error", state="error")
-                placeholder.empty()
-                st.error(f"Error del modelo: {e}")
-                return
+                st.error(f"❌ Error en paso de diagnóstico: {e}")
+                import traceback
+                with st.expander("🔍 Traceback completo"):
+                    st.code(traceback.format_exc())
 
-            elapsed_ms = int((time.time() - t0) * 1000)
-            status.update(label="✅ Listo", state="complete")
-
-    placeholder.empty()
-
-    contenido = respuesta.content if hasattr(respuesta, "content") else str(respuesta)
-    st.markdown(contenido)
-
-    # Guardar en estado
-    st.session_state.messages.append({"role": "assistant", "content": contenido})
-
-    # Tokens y costo
-    t_in = respuesta.usage_metadata.get("input_tokens", 0) if hasattr(respuesta, "usage_metadata") else 0
-    t_out = respuesta.usage_metadata.get("output_tokens", 0) if hasattr(respuesta, "usage_metadata") else 0
-    costo = (t_in * info_modelo["input_cost"] + t_out * info_modelo["output_cost"]) / 1000
-    st.session_state.total_tokens += t_in + t_out
-    st.session_state.costo_total += costo
-
-    # Guardar en Supabase
-    _guardar_mensaje_db(usuario, contenido, t_in, t_out, costo, elapsed_ms, modelo_nombre)
-    registrar_log(
-        session_id=st.session_state.session_id,
-        usuario_id=usuario.id,
-        asignatura=asignatura,
-        modelo=modelo_nombre,
-        mensaje_usuario=prompt,
-        respuesta_agente=contenido,
-        tokens_input=t_in,
-        tokens_output=t_out,
-        costo_usd=costo,
-        tiempo_respuesta_ms=elapsed_ms,
-    )
+        # Mostrar respuesta generada
+        if st.session_state.messages and st.session_state.messages[-1]["role"] == "assistant":
+            st.markdown(st.session_state.messages[-1]["content"])
 
 
 # ============================================================
