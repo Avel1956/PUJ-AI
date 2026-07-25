@@ -3,8 +3,8 @@ import streamlit as st
 import time
 import uuid
 import datetime
-from langchain.chat_models import ChatOpenAI
-from langchain.schema import HumanMessage, AIMessage, SystemMessage
+from langchain_openai import ChatOpenAI
+from langchain_core.messages import HumanMessage, AIMessage, SystemMessage
 
 from auth import usuario_actual, get_supabase
 from config import MODELOS_DISPONIBLES, MODELO_POR_DEFECTO

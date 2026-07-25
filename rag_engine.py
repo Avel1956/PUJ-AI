@@ -6,7 +6,7 @@ from langchain.text_splitter import RecursiveCharacterTextSplitter
 from langchain_community.document_loaders import PyPDFLoader, TextLoader
 from langchain_community.embeddings import HuggingFaceEmbeddings
 from langchain_chroma import Chroma
-from langchain.schema import Document
+from langchain_core.documents import Document
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 ASIGNATURAS_DIR = os.path.join(BASE_DIR, "asignaturas")
