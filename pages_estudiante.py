@@ -15,6 +15,16 @@ from telemetry import registrar_log, ControlAbuso
 
 def render_dashboard_estudiante():
     """Punto de entrada del dashboard de estudiante."""
+    try:
+        _render_dashboard_estudiante()
+    except Exception as e:
+        st.error(f"❌ Error: {e}")
+        import traceback
+        with st.expander("🔍 Detalles técnicos"):
+            st.code(traceback.format_exc())
+
+
+def _render_dashboard_estudiante():
     usuario = usuario_actual()
     st.title(f"🎓 Tutor Socrático")
     st.caption(f"Bienvenido, {usuario.nombre} — Estudiante")
