@@ -200,10 +200,17 @@ CREATE POLICY "Sistema inserta logs" ON logs_sesiones
 -- ─── POLÍTICAS DELETE ───
 -- Admin puede borrar cualquier perfil (excepto a sí mismo)
 CREATE POLICY "Admin borra perfiles" ON profiles
-    FOR DELETE USING (EXISTS (
-        SELECT 1 FROM profiles WHERE id = auth.uid() AND rol = 'admin'
-    ) AND id != auth.uid());
+    FOR DELETE USING (
+        (SELECT rol FROM profiles WHERE id = auth.uid()) = 'admin'
+        AND id != auth.uid()
+    );
 
+-- Docente puede borrar perfiles de estudiantes
+CREATE POLICY "Docente borra estudiantes" ON profiles
+    FOR DELETE USING (
+        (SELECT rol FROM profiles WHERE id = auth.uid()) = 'docente'
+        AND (SELECT rol FROM profiles WHERE id = profiles.id) = 'estudiante'
+    );
 -- Docente borra sus propios grupos, admin borra cualquier grupo
 CREATE POLICY "Docente borra sus grupos" ON grupos
     FOR DELETE USING (creado_por = auth.uid());

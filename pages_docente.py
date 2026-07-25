@@ -95,7 +95,7 @@ def _tab_estudiantes(usuario):
 
         with st.expander(f"🧑 {p['nombre']} — {p['email']} — {n_convs} conversaciones"):
             st.caption(f"Registrado: {p.get('created_at', '?')}")
-            col1, col2 = st.columns(2)
+            col1, col2, col3 = st.columns(3)
             with col1:
                 if st.button("📊 Ver conversaciones", key=f"ver_conv_est_{p['id']}"):
                     st.query_params["tab"] = "tracking"
@@ -106,6 +106,13 @@ def _tab_estudiantes(usuario):
                 if st.button("📥 Descargar JSONL", key=f"dl_est_{p['id']}"):
                     jsonl = _generar_jsonl_estudiante(p["id"], p["nombre"])
                     _ofrecer_descarga(jsonl, f"conversaciones_{p['nombre'].replace(' ', '_')}.jsonl")
+            with col3:
+                if st.button("🗑️ Eliminar", key=f"del_est_{p['id']}", type="secondary"):
+                    _confirmar_y_borrar(
+                        f"¿Eliminar a {p['nombre']} y todas sus conversaciones?",
+                        lambda pid=p["id"]: _borrar_estudiante(pid),
+                        f"really_del_est_{p['id']}",
+                    )
 
 
 # ============================================================
@@ -797,6 +804,29 @@ def _borrar_conversacion(conv_id: str):
     supabase = get_supabase()
     supabase.table("mensajes").delete().eq("conversacion_id", conv_id).execute()
     supabase.table("conversaciones").delete().eq("id", conv_id).execute()
+
+
+def _borrar_estudiante(estudiante_id: str):
+    """Borra un estudiante y todas sus conversaciones/mensajes."""
+    supabase = get_supabase()
+    supabase_admin = get_supabase_admin()
+    # Borrar mensajes de todas sus conversaciones
+    convs = supabase.table("conversaciones").select("id").eq("estudiante_id", estudiante_id).execute()
+    for c in (convs.data or []):
+        supabase.table("mensajes").delete().eq("conversacion_id", c["id"]).execute()
+    # Borrar conversaciones
+    supabase.table("conversaciones").delete().eq("estudiante_id", estudiante_id).execute()
+    # Borrar membresías en grupos
+    supabase.table("grupos_estudiantes").delete().eq("estudiante_id", estudiante_id).execute()
+    # Borrar mensajes de docente dirigidos a este estudiante
+    supabase.table("mensajes_docente").delete().eq("para_estudiante_id", estudiante_id).execute()
+    # Borrar perfil
+    supabase.table("profiles").delete().eq("id", estudiante_id).execute()
+    # Borrar usuario auth
+    try:
+        supabase_admin.auth.admin.delete_user(estudiante_id)
+    except Exception:
+        pass
 
 
 def _borrar_mensaje_docente(msg_id: str):

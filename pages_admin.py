@@ -377,19 +377,53 @@ def _confirmar_y_borrar(mensaje: str, accion, confirm_key: str):
 
 
 def _borrar_perfil(perfil_id: str, rol: str):
-    """Borra un perfil y toda su data asociada."""
+    """Borra un perfil y toda su data asociada, con cascada."""
     supabase_admin = get_supabase_admin()
-    # El trigger o las políticas cascadean — pero hacemos explícito
-    tablas = ["mensajes", "conversaciones", "grupos_estudiantes", "grupos", "mensajes_docente", "logs_sesiones"]
-    for tabla in tablas:
-        col = _columna_por_tabla(tabla, rol)
-        if col:
+    supabase = get_supabase()
+
+    if rol == "docente":
+        # 1. Encontrar todos los estudiantes en grupos de este docente
+        grupos = supabase.table("grupos").select("id").eq("creado_por", perfil_id).execute()
+        estudiantes_a_borrar = set()
+        for g in (grupos.data or []):
+            miembros = supabase.table("grupos_estudiantes").select("estudiante_id").eq("grupo_id", g["id"]).execute()
+            for m in (miembros.data or []):
+                estudiantes_a_borrar.add(m["estudiante_id"])
+        # 2. Borrar cada estudiante encontrado (cascada)
+        for est_id in estudiantes_a_borrar:
             try:
-                supabase_admin.table(tabla).delete().eq(col, perfil_id).execute()
+                _borrar_perfil(est_id, "estudiante")
             except Exception:
                 pass
+        # 3. Borrar grupos del docente
+        for g in (grupos.data or []):
+            try:
+                supabase_admin.table("grupos_estudiantes").delete().eq("grupo_id", g["id"]).execute()
+                supabase_admin.table("grupos").delete().eq("id", g["id"]).execute()
+            except Exception:
+                pass
+        # 4. Borrar mensajes enviados por el docente
+        try:
+            supabase_admin.table("mensajes_docente").delete().eq("de_usuario_id", perfil_id).execute()
+        except Exception:
+            pass
+
+    elif rol == "estudiante":
+        # Borrar conversaciones y mensajes del estudiante
+        tablas = ["mensajes", "conversaciones", "grupos_estudiantes", "mensajes_docente", "logs_sesiones"]
+        for tabla in tablas:
+            col = _columna_por_tabla(tabla, rol)
+            if col:
+                try:
+                    supabase_admin.table(tabla).delete().eq(col, perfil_id).execute()
+                except Exception:
+                    pass
+
     # Borrar perfil
-    supabase_admin.table("profiles").delete().eq("id", perfil_id).execute()
+    try:
+        supabase_admin.table("profiles").delete().eq("id", perfil_id).execute()
+    except Exception:
+        pass
     # Borrar usuario auth
     try:
         supabase_admin.auth.admin.delete_user(perfil_id)
