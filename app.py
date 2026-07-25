@@ -3,7 +3,7 @@ import streamlit as st
 
 # Configuración de página — DEBE ser la primera llamada
 st.set_page_config(
-    page_title="Tutor Socrático Universal",
+    page_title="PUJ-IA",
     page_icon="🎓",
     layout="wide",
     initial_sidebar_state="expanded",
@@ -53,7 +53,7 @@ def main():
 # Login / Signup
 # ============================================================
 def _render_login_page():
-    st.title("🎓 Tutor Socrático Universal")
+    st.title("🎓 PUJ-IA")
     st.caption("Asistente pedagógico para estudiantes de ingeniería — Pontificia Universidad Javeriana Cali")
 
     tab_login, tab_signup = st.tabs(["🔑 Iniciar sesión", "📝 Registrarse"])
@@ -129,7 +129,7 @@ def _render_sidebar_logout():
         st.divider()
         st.caption("© 2026 · Pontificia Univ. Javeriana Cali")
         st.caption("Investigador: J. A. Vélez Zea")
-        st.caption("v0.1.0 · Tutor Socrático Universal")
+        st.caption("v0.1.0 · PUJ-IA")
 
 
 if __name__ == "__main__":

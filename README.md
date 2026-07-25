@@ -1,4 +1,4 @@
-# Tutor Socrático Universal
+# PUJ-IA
 
 Asistente pedagógico basado en IA con RAG para estudiantes de ingeniería — Pontificia Universidad Javeriana Cali.
 

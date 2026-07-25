@@ -26,7 +26,7 @@ def render_dashboard_estudiante():
 
 def _render_dashboard_estudiante():
     usuario = usuario_actual()
-    st.title(f"🎓 Tutor Socrático")
+    st.title("🎓 PUJ-IA")
     st.caption(f"Bienvenido, {usuario.nombre} — Estudiante")
 
     # Sidebar
@@ -171,7 +171,7 @@ def _responder(prompt, motor, asignatura, usuario, control):
     if info_modelo["provider"] == "openrouter":
         api_key = st.secrets["OPENROUTER_API_KEY"]
         base_url = "https://openrouter.ai/api/v1"
-        default_headers = {"HTTP-Referer": "https://tutor-socratico.streamlit.app", "X-Title": "Tutor Socrático"}
+        default_headers = {"HTTP-Referer": "https://puj-ia.streamlit.app", "X-Title": "PUJ-IA"}
     else:
         api_key = st.secrets["DEEPSEEK_API_KEY"]
         base_url = "https://api.deepseek.com"
