@@ -1,16 +1,30 @@
-"""rag_engine.py — Motor RAG con LangChain + ChromaDB + sentence-transformers."""
+"""rag_engine.py — Motor RAG con LangChain + ChromaDB (ONNX, sin torch)."""
 import os
 import hashlib
 import time
 from langchain_text_splitters import RecursiveCharacterTextSplitter
 from langchain_community.document_loaders import PyPDFLoader, TextLoader
-from langchain_community.embeddings import HuggingFaceEmbeddings
 from langchain_chroma import Chroma
 from langchain_core.documents import Document
+from chromadb.utils import embedding_functions
+
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 ASIGNATURAS_DIR = os.path.join(BASE_DIR, "asignaturas")
 VECTORSTORE_DIR = os.path.join(BASE_DIR, ".vectorstores")
+
+
+class ChromaEmbedder:
+    """Wrapper ligero sobre ChromaDB ONNX — sin torch ni sentence-transformers."""
+
+    def __init__(self):
+        self._ef = embedding_functions.DefaultEmbeddingFunction()
+
+    def embed_documents(self, texts: list[str]) -> list[list[float]]:
+        return self._ef(texts)
+
+    def embed_query(self, text: str) -> list[float]:
+        return self._ef([text])[0]
 
 
 class MotorRAG:
@@ -22,11 +36,7 @@ class MotorRAG:
         self.ruta_docs = os.path.join(self.ruta, "documentos")
         self.persist_dir = os.path.join(VECTORSTORE_DIR, nombre_asignatura)
 
-        # Embedder ligero (~80 MB) — compatible con Streamlit Cloud (1 GB RAM)
-        self.embeddings = HuggingFaceEmbeddings(
-            model_name="sentence-transformers/all-MiniLM-L6-v2",
-            model_kwargs={"device": "cpu"},
-        )
+        self.embeddings = ChromaEmbedder()
 
         self.documents: list[Document] = []
         self.vectorstore: Chroma | None = None
