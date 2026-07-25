@@ -142,29 +142,39 @@ def _tab_chat(usuario):
 
 def _procesar_respuesta(prompt: str, motor: MotorRAG, asignatura: str, usuario):
     """Procesa la pregunta del estudiante con RAG + LLM."""
+    try:
+        _procesar_respuesta_interna(prompt, motor, asignatura, usuario)
+    except Exception as e:
+        st.error(f"Error inesperado: {e}")
+        import traceback
+        with st.expander("🔍 Detalles técnicos"):
+            st.code(traceback.format_exc())
+
+
+def _procesar_respuesta_interna(prompt: str, motor: MotorRAG, asignatura: str, usuario):
     modelo_nombre = _get_modelo_activo()
     info_modelo = MODELOS_DISPONIBLES.get(modelo_nombre, MODELOS_DISPONIBLES[MODELO_POR_DEFECTO])
 
     # Configurar LLM según provider
     if info_modelo["provider"] == "openrouter":
         api_key = st.secrets["OPENROUTER_API_KEY"]
-        api_base = "https://openrouter.ai/api/v1"
-        extra_headers = {
+        base_url = "https://openrouter.ai/api/v1"
+        default_headers = {
             "HTTP-Referer": "https://tutor-socratico.streamlit.app",
             "X-Title": "Tutor Socrático",
         }
     else:  # deepseek
         api_key = st.secrets["DEEPSEEK_API_KEY"]
-        api_base = "https://api.deepseek.com/v1"
-        extra_headers = {}
+        base_url = "https://api.deepseek.com"
+        default_headers = None
 
     llm = ChatOpenAI(
         model=info_modelo["model_id"],
-        openai_api_key=api_key,
-        openai_api_base=api_base,
+        api_key=api_key,
+        base_url=base_url,
         temperature=0.7,
         max_tokens=2048,
-        model_kwargs={"extra_headers": extra_headers} if extra_headers else {},
+        default_headers=default_headers,
     )
 
     # Recuperar contexto
