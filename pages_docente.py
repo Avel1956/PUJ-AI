@@ -1,7 +1,8 @@
-"""pages_docente.py — Dashboard del docente: estudiantes, grupos, tracking, mensajes."""
+"""pages_docente.py — Dashboard del docente: estudiantes, grupos, tracking, mensajes, descargas."""
 import streamlit as st
 import datetime
-from auth import usuario_actual, get_supabase, crear_usuario_estudiante
+import json
+from auth import usuario_actual, get_supabase, get_supabase_admin, crear_usuario_estudiante
 
 
 def render_dashboard_docente():
@@ -10,9 +11,15 @@ def render_dashboard_docente():
     st.title(f"👨‍🏫 Panel Docente")
     st.caption(f"{usuario.nombre} — Profesor")
 
-    tab1, tab2, tab3, tab4 = st.tabs([
-        "👥 Estudiantes", "👥 Grupos", "📊 Tracking", "📬 Mensajes"
+    # Manejar navegación desde botones "Ver conversaciones"
+    tab_idx = _resolver_tab_inicial()
+
+    tab1, tab2, tab3, tab4, tab5 = st.tabs([
+        "👥 Estudiantes", "👥 Grupos", "📊 Tracking", "📬 Mensajes", "📥 Descargas"
     ])
+
+    # Streamlit no permite setear tab activo directamente, usamos query params
+    tab_labels = ["👥 Estudiantes", "👥 Grupos", "📊 Tracking", "📬 Mensajes", "📥 Descargas"]
 
     with tab1:
         _tab_estudiantes(usuario)
@@ -22,6 +29,17 @@ def render_dashboard_docente():
         _tab_tracking(usuario)
     with tab4:
         _tab_mensajes(usuario)
+    with tab5:
+        _tab_descargas(usuario)
+
+
+def _resolver_tab_inicial() -> int:
+    """Si se clickeó 'Ver conversaciones', redirigir al tab tracking."""
+    if st.query_params.get("tab") == "tracking":
+        st.query_params.clear()
+        # Mostrar aviso de navegación
+        st.info("⬇️ Conversaciones cargadas en la pestaña **📊 Tracking** — desplácese hacia abajo para verlas.")
+    return 0
 
 
 # ============================================================
@@ -67,7 +85,6 @@ def _tab_estudiantes(usuario):
         return
 
     for p in resp.data:
-        # Contar conversaciones
         convs_resp = (
             supabase.table("conversaciones")
             .select("id", count="exact")
@@ -78,11 +95,17 @@ def _tab_estudiantes(usuario):
 
         with st.expander(f"🧑 {p['nombre']} — {p['email']} — {n_convs} conversaciones"):
             st.caption(f"Registrado: {p.get('created_at', '?')}")
-            # Ver conversaciones de este estudiante
-            if st.button("📊 Ver conversaciones", key=f"ver_conv_est_{p['id']}"):
-                st.session_state._tracking_estudiante = p["id"]
-                st.session_state._tracking_nombre = p["nombre"]
-                st.rerun()
+            col1, col2 = st.columns(2)
+            with col1:
+                if st.button("📊 Ver conversaciones", key=f"ver_conv_est_{p['id']}"):
+                    st.query_params["tab"] = "tracking"
+                    st.session_state._tracking_estudiante = p["id"]
+                    st.session_state._tracking_nombre = p["nombre"]
+                    st.rerun()
+            with col2:
+                if st.button("📥 Descargar JSONL", key=f"dl_est_{p['id']}"):
+                    jsonl = _generar_jsonl_estudiante(p["id"], p["nombre"])
+                    _ofrecer_descarga(jsonl, f"conversaciones_{p['nombre'].replace(' ', '_')}.jsonl")
 
 
 # ============================================================
@@ -92,7 +115,6 @@ def _tab_grupos(usuario):
     st.subheader("👥 Grupos de Trabajo")
     supabase = get_supabase()
 
-    # Lista de estudiantes para asignar
     estudiantes = (
         supabase.table("profiles")
         .select("id, nombre, email")
@@ -173,10 +195,15 @@ def _tab_grupos(usuario):
             col1, col2, col3 = st.columns(3)
             with col1:
                 if st.button("📊 Ver conversaciones", key=f"ver_conv_grp_{g['id']}"):
+                    st.query_params["tab"] = "tracking"
                     st.session_state._tracking_grupo = g["id"]
+                    st.session_state._tracking_nombre = g["nombre"]
                     st.session_state._tracking_tipo = "grupo"
                     st.rerun()
-
+            with col2:
+                if st.button("📥 Descargar JSONL", key=f"dl_grp_{g['id']}"):
+                    jsonl = _generar_jsonl_grupo(g["id"], g["nombre"])
+                    _ofrecer_descarga(jsonl, f"grupo_{g['nombre'].replace(' ', '_')}.jsonl")
             with col3:
                 if st.button("🗑️ Eliminar grupo", key=f"del_grp_{g['id']}", type="secondary"):
                     _confirmar_y_borrar(
@@ -185,9 +212,14 @@ def _tab_grupos(usuario):
                         f"really_del_grp_{g['id']}",
                     )
 
-            # Quitar miembro individual
+            # Quitar miembro
             if len(ids_m) > 0:
-                quitar = st.selectbox("Quitar miembro", [""] + nombres_m, key=f"quitar_miembro_{g['id']}", label_visibility="collapsed", placeholder="Quitar miembro...")
+                quitar = st.selectbox(
+                    "Quitar miembro", [""] + nombres_m,
+                    key=f"quitar_miembro_{g['id']}",
+                    label_visibility="collapsed",
+                    placeholder="Quitar miembro...",
+                )
                 if quitar and st.button("✖️ Quitar", key=f"btn_quitar_{g['id']}"):
                     idx = nombres_m.index(quitar)
                     est_id = ids_m[idx]
@@ -218,7 +250,7 @@ def _tab_tracking(usuario):
         )
         mapa_est = {p["nombre"]: p["id"] for p in (estudiantes.data or [])}
 
-        # Si venimos de un botón "ver conversaciones"
+        # Determinar estudiante por defecto (desde navegación cruzada)
         default_idx = 0
         if "_tracking_estudiante" in st.session_state:
             nombre_track = st.session_state.get("_tracking_nombre", "")
@@ -257,6 +289,19 @@ def _tab_tracking(usuario):
         st.info("No se encontraron conversaciones con esos filtros.")
         return
 
+    # Barra de acciones masivas
+    if convs_resp.data:
+        col_dl, _ = st.columns([2, 4])
+        with col_dl:
+            if estudiante_sel != "(Todos)":
+                if st.button(f"📥 Descargar todas las de {estudiante_sel} (JSONL)", key="dl_tracking_estudiante"):
+                    jsonl = _generar_jsonl_estudiante(mapa_est[estudiante_sel], estudiante_sel)
+                    _ofrecer_descarga(jsonl, f"conversaciones_{estudiante_sel.replace(' ', '_')}.jsonl")
+            else:
+                if st.button("📥 Descargar TODO lo visible (JSONL)", key="dl_tracking_todo"):
+                    jsonl = _generar_jsonl_docente(usuario.id)
+                    _ofrecer_descarga(jsonl, f"todas_conversaciones_docente.jsonl")
+
     for conv in convs_resp.data:
         perfil_resp = (
             supabase.table("profiles")
@@ -286,10 +331,10 @@ def _tab_tracking(usuario):
         with st.expander(f"💬 {nombre_est}{grupo_info} — {conv['asignatura']} — {fecha} — {n_mensajes} msgs"):
             mensajes_resp = (
                 supabase.table("mensajes")
-                .select("rol, contenido, created_at")
+                .select("rol, contenido, created_at, tokens_input, tokens_output, costo_usd")
                 .eq("conversacion_id", conv["id"])
                 .order("created_at")
-                .limit(30)
+                .limit(50)
                 .execute()
             )
             if mensajes_resp.data:
@@ -299,7 +344,7 @@ def _tab_tracking(usuario):
                     st.markdown(m["contenido"][:600])
                     st.divider()
 
-            col1, col2 = st.columns(2)
+            col1, col2, col3 = st.columns(3)
             with col1:
                 if st.button(f"📨 Enviar mensaje a {nombre_est}", key=f"msg_{conv['id']}"):
                     st.session_state._mensaje_para = {
@@ -309,6 +354,9 @@ def _tab_tracking(usuario):
                     }
                     st.rerun()
             with col2:
+                jsonl_conv = _generar_jsonl_conversacion(conv, nombre_est, mensajes_resp.data)
+                _ofrecer_descarga(jsonl_conv, f"conv_{conv['id'][:8]}.jsonl", label=f"📥 JSONL")
+            with col3:
                 if st.button("🗑️ Eliminar conversación", key=f"del_conv_{conv['id']}", type="secondary"):
                     _confirmar_y_borrar(
                         f"¿Eliminar conversación de {nombre_est} ({conv['asignatura']}, {n_mensajes} mensajes)?",
@@ -324,10 +372,9 @@ def _tab_mensajes(usuario):
     st.subheader("📬 Enviar mensaje a estudiantes/grupos")
     supabase = get_supabase()
 
-    # Si venimos de un botón "enviar mensaje"
     if "_mensaje_para" in st.session_state:
         info = st.session_state._mensaje_para
-        st.info(f"📨 Redactando mensaje para **{info['estudiante_nombre']}**")
+        st.info(f"📨 Redactando mensaje para **{info.get('estudiante_nombre', info.get('estudiante_id', '?'))}**")
         del st.session_state._mensaje_para
 
     destino_tipo = st.radio("Enviar a:", ["Estudiante individual", "Grupo"], horizontal=True)
@@ -409,10 +456,319 @@ def _tab_mensajes(usuario):
 
 
 # ============================================================
-# Helpers
+# Tab: Descargas (JSONL)
+# ============================================================
+def _tab_descargas(usuario):
+    st.subheader("📥 Descargar Conversaciones (JSONL)")
+    st.caption("Formato JSONL: una línea por mensaje. Incluye metadatos (estudiante, asignatura, tokens, costo). Ideal para análisis con otros agentes IA.")
+
+    supabase = get_supabase()
+
+    # --- Estudiantes disponibles ---
+    estudiantes = (
+        supabase.table("profiles")
+        .select("id, nombre")
+        .eq("rol", "estudiante")
+        .order("nombre")
+        .execute()
+    )
+    mapa_est = {p["nombre"]: p for p in (estudiantes.data or [])}
+
+    # --- Grupos del docente ---
+    grupos = (
+        supabase.table("grupos")
+        .select("id, nombre, asignatura")
+        .eq("creado_por", usuario.id)
+        .order("nombre")
+        .execute()
+    )
+    mapa_grp = {g["nombre"]: g for g in (grupos.data or [])}
+
+    col1, col2, col3 = st.columns(3)
+
+    with col1:
+        st.markdown("**Por estudiante**")
+        est_nombre = st.selectbox("Estudiante", options=["(Seleccionar)"] + list(mapa_est.keys()), key="dl_estudiante")
+        if est_nombre != "(Seleccionar)" and st.button("📥 Descargar JSONL", key="btn_dl_estudiante", use_container_width=True):
+            est = mapa_est[est_nombre]
+            jsonl = _generar_jsonl_estudiante(est["id"], est_nombre)
+            _ofrecer_descarga(jsonl, f"conversaciones_{est_nombre.replace(' ', '_')}.jsonl")
+
+    with col2:
+        st.markdown("**Por grupo**")
+        grp_nombre = st.selectbox("Grupo", options=["(Seleccionar)"] + list(mapa_grp.keys()), key="dl_grupo")
+        if grp_nombre != "(Seleccionar)" and st.button("📥 Descargar JSONL", key="btn_dl_grupo", use_container_width=True):
+            grp = mapa_grp[grp_nombre]
+            jsonl = _generar_jsonl_grupo(grp["id"], grp_nombre)
+            _ofrecer_descarga(jsonl, f"grupo_{grp_nombre.replace(' ', '_')}.jsonl")
+
+    with col3:
+        st.markdown("**Todo**")
+        n_total = _contar_conversaciones_docente(usuario.id)
+        st.metric("Conversaciones totales", n_total)
+        if st.button("📥 Descargar TODO (JSONL)", key="btn_dl_todo", use_container_width=True, type="primary"):
+            jsonl = _generar_jsonl_docente(usuario.id)
+            _ofrecer_descarga(jsonl, "todas_conversaciones.jsonl")
+
+    # --- Asignaturas ---
+    st.divider()
+    st.markdown("**Por asignatura**")
+    asignaturas_resp = supabase.table("conversaciones").select("asignatura").execute()
+    asigs = sorted(set(
+        c["asignatura"] for c in (asignaturas_resp.data or []) if c["asignatura"]
+    ))
+
+    if asigs:
+        col_asig, _ = st.columns([2, 4])
+        with col_asig:
+            asig_sel = st.selectbox("Asignatura", asigs, key="dl_asignatura")
+            if st.button("📥 Descargar asignatura (JSONL)", key="btn_dl_asignatura"):
+                jsonl = _generar_jsonl_asignatura(asig_sel, usuario.id)
+                _ofrecer_descarga(jsonl, f"asignatura_{asig_sel}.jsonl")
+
+    # --- Preview ---
+    st.divider()
+    st.subheader("🔍 Formato de ejemplo")
+    st.code(
+        '{"tipo":"metadata","version":"1.0","exportado_por":"docente@...","fecha":"2026-01-01T00:00:00"}\n'
+        '{"tipo":"mensaje","conversacion_id":"uuid","estudiante_id":"uuid","estudiante_nombre":"Ana","asignatura":"mecanica","rol":"user","contenido":"¿Qué es una fuerza?","tokens_input":0,"tokens_output":0,"costo_usd":0,"timestamp":"2026-01-01T00:00:00"}\n'
+        '{"tipo":"mensaje","conversacion_id":"uuid","estudiante_id":"uuid","estudiante_nombre":"Ana","asignatura":"mecanica","rol":"assistant","contenido":"Excelente pregunta. ¿Qué entiendes tú por fuerza?","tokens_input":150,"tokens_output":45,"costo_usd":0.0003,"timestamp":"2026-01-01T00:00:05"}',
+        language="json",
+    )
+
+
+# ============================================================
+# Helpers de descarga JSONL
+# ============================================================
+def _generar_jsonl_estudiante(estudiante_id: str, nombre: str) -> str:
+    """Genera JSONL con todas las conversaciones de un estudiante."""
+    supabase = get_supabase()
+    convs = (
+        supabase.table("conversaciones")
+        .select("id, asignatura, titulo, created_at, activa")
+        .eq("estudiante_id", estudiante_id)
+        .order("created_at")
+        .execute()
+    )
+    lineas = [_linea_metadata()]
+    for conv in (convs.data or []):
+        msgs = (
+            supabase.table("mensajes")
+            .select("rol, contenido, created_at, tokens_input, tokens_output, costo_usd")
+            .eq("conversacion_id", conv["id"])
+            .order("created_at")
+            .execute()
+        )
+        for m in (msgs.data or []):
+            lineas.append(json.dumps({
+                "tipo": "mensaje",
+                "conversacion_id": conv["id"],
+                "estudiante_id": estudiante_id,
+                "estudiante_nombre": nombre,
+                "asignatura": conv["asignatura"],
+                "conversacion_titulo": conv["titulo"],
+                "conversacion_activa": conv["activa"],
+                "rol": m["rol"],
+                "contenido": m["contenido"],
+                "tokens_input": m.get("tokens_input", 0),
+                "tokens_output": m.get("tokens_output", 0),
+                "costo_usd": str(m.get("costo_usd", 0)),
+                "timestamp": m["created_at"],
+            }, ensure_ascii=False))
+    return "\n".join(lineas)
+
+
+def _generar_jsonl_grupo(grupo_id: str, nombre_grupo: str) -> str:
+    """Genera JSONL con todas las conversaciones de los miembros de un grupo."""
+    supabase = get_supabase()
+    miembros = (
+        supabase.table("grupos_estudiantes")
+        .select("estudiante_id, profiles!estudiante_id(nombre)")
+        .eq("grupo_id", grupo_id)
+        .execute()
+    )
+    lineas = [_linea_metadata(extra={"grupo_id": grupo_id, "grupo_nombre": nombre_grupo})]
+    for mi in (miembros.data or []):
+        est_id = mi["estudiante_id"]
+        est_nombre = mi.get("profiles", {}).get("nombre", "?") if isinstance(mi.get("profiles"), dict) else "?"
+        convs = (
+            supabase.table("conversaciones")
+            .select("id, asignatura, titulo, created_at, activa")
+            .eq("estudiante_id", est_id)
+            .order("created_at")
+            .execute()
+        )
+        for conv in (convs.data or []):
+            msgs = (
+                supabase.table("mensajes")
+                .select("rol, contenido, created_at, tokens_input, tokens_output, costo_usd")
+                .eq("conversacion_id", conv["id"])
+                .order("created_at")
+                .execute()
+            )
+            for m in (msgs.data or []):
+                lineas.append(json.dumps({
+                    "tipo": "mensaje",
+                    "conversacion_id": conv["id"],
+                    "estudiante_id": est_id,
+                    "estudiante_nombre": est_nombre,
+                    "grupo_id": grupo_id,
+                    "grupo_nombre": nombre_grupo,
+                    "asignatura": conv["asignatura"],
+                    "conversacion_titulo": conv["titulo"],
+                    "conversacion_activa": conv["activa"],
+                    "rol": m["rol"],
+                    "contenido": m["contenido"],
+                    "tokens_input": m.get("tokens_input", 0),
+                    "tokens_output": m.get("tokens_output", 0),
+                    "costo_usd": str(m.get("costo_usd", 0)),
+                    "timestamp": m["created_at"],
+                }, ensure_ascii=False))
+    return "\n".join(lineas)
+
+
+def _generar_jsonl_docente(docente_id: str) -> str:
+    """Genera JSONL con todas las conversaciones de TODOS los estudiantes (global para docente)."""
+    supabase = get_supabase()
+    estudiantes = (
+        supabase.table("profiles")
+        .select("id, nombre")
+        .eq("rol", "estudiante")
+        .execute()
+    )
+    lineas = [_linea_metadata(extra={"docente_id": docente_id})]
+    for est in (estudiantes.data or []):
+        convs = (
+            supabase.table("conversaciones")
+            .select("id, asignatura, titulo, created_at, activa")
+            .eq("estudiante_id", est["id"])
+            .order("created_at")
+            .execute()
+        )
+        for conv in (convs.data or []):
+            msgs = (
+                supabase.table("mensajes")
+                .select("rol, contenido, created_at, tokens_input, tokens_output, costo_usd")
+                .eq("conversacion_id", conv["id"])
+                .order("created_at")
+                .execute()
+            )
+            for m in (msgs.data or []):
+                lineas.append(json.dumps({
+                    "tipo": "mensaje",
+                    "conversacion_id": conv["id"],
+                    "estudiante_id": est["id"],
+                    "estudiante_nombre": est["nombre"],
+                    "asignatura": conv["asignatura"],
+                    "conversacion_titulo": conv["titulo"],
+                    "conversacion_activa": conv["activa"],
+                    "rol": m["rol"],
+                    "contenido": m["contenido"],
+                    "tokens_input": m.get("tokens_input", 0),
+                    "tokens_output": m.get("tokens_output", 0),
+                    "costo_usd": str(m.get("costo_usd", 0)),
+                    "timestamp": m["created_at"],
+                }, ensure_ascii=False))
+    return "\n".join(lineas)
+
+
+def _generar_jsonl_asignatura(asignatura: str, docente_id: str = "") -> str:
+    """Genera JSONL para una asignatura específica."""
+    supabase = get_supabase()
+    convs = (
+        supabase.table("conversaciones")
+        .select("id, estudiante_id, asignatura, titulo, created_at, activa")
+        .eq("asignatura", asignatura)
+        .order("created_at")
+        .execute()
+    )
+    lineas = [_linea_metadata(extra={"asignatura": asignatura, "docente_id": docente_id})]
+    est_cache = {}
+    for conv in (convs.data or []):
+        est_id = conv["estudiante_id"]
+        if est_id not in est_cache:
+            pr = supabase.table("profiles").select("nombre").eq("id", est_id).single().execute()
+            est_cache[est_id] = pr.data["nombre"] if pr.data else "?"
+        est_nombre = est_cache[est_id]
+        msgs = (
+            supabase.table("mensajes")
+            .select("rol, contenido, created_at, tokens_input, tokens_output, costo_usd")
+            .eq("conversacion_id", conv["id"])
+            .order("created_at")
+            .execute()
+        )
+        for m in (msgs.data or []):
+            lineas.append(json.dumps({
+                "tipo": "mensaje",
+                "conversacion_id": conv["id"],
+                "estudiante_id": est_id,
+                "estudiante_nombre": est_nombre,
+                "asignatura": conv["asignatura"],
+                "conversacion_titulo": conv["titulo"],
+                "conversacion_activa": conv["activa"],
+                "rol": m["rol"],
+                "contenido": m["contenido"],
+                "tokens_input": m.get("tokens_input", 0),
+                "tokens_output": m.get("tokens_output", 0),
+                "costo_usd": str(m.get("costo_usd", 0)),
+                "timestamp": m["created_at"],
+            }, ensure_ascii=False))
+    return "\n".join(lineas)
+
+
+def _generar_jsonl_conversacion(conv: dict, nombre_est: str, mensajes: list) -> str:
+    """Genera JSONL para una sola conversación."""
+    lineas = [_linea_metadata(extra={"conversacion_id": conv["id"], "conversacion_titulo": conv.get("titulo", "")})]
+    for m in (mensajes or []):
+        lineas.append(json.dumps({
+            "tipo": "mensaje",
+            "conversacion_id": conv["id"],
+            "estudiante_id": conv["estudiante_id"],
+            "estudiante_nombre": nombre_est,
+            "asignatura": conv["asignatura"],
+            "conversacion_titulo": conv.get("titulo", ""),
+            "conversacion_activa": conv.get("activa", True),
+            "rol": m["rol"],
+            "contenido": m["contenido"],
+            "tokens_input": m.get("tokens_input", 0),
+            "tokens_output": m.get("tokens_output", 0),
+            "costo_usd": str(m.get("costo_usd", 0)),
+            "timestamp": m["created_at"],
+        }, ensure_ascii=False))
+    return "\n".join(lineas)
+
+
+def _contar_conversaciones_docente(docente_id: str) -> int:
+    supabase = get_supabase()
+    resp = supabase.table("conversaciones").select("id", count="exact").execute()
+    return resp.count if hasattr(resp, "count") else 0
+
+
+def _linea_metadata(extra: dict | None = None) -> str:
+    obj = {
+        "tipo": "metadata",
+        "version": "1.0",
+        "fecha_exportacion": datetime.datetime.now().isoformat(),
+        **(extra or {}),
+    }
+    return json.dumps(obj, ensure_ascii=False)
+
+
+def _ofrecer_descarga(jsonl: str, filename: str, label: str = "📥 Descargar"):
+    """Muestra botón de descarga para contenido JSONL."""
+    if jsonl.strip():
+        st.download_button(
+            label=label,
+            data=jsonl,
+            file_name=filename,
+            mime="application/x-ndjson",
+        )
+
+
+# ============================================================
+# CRUD Helpers
 # ============================================================
 def _confirmar_y_borrar(mensaje: str, accion, confirm_key: str):
-    """Confirmación en 2 pasos antes de borrar."""
     if confirm_key not in st.session_state:
         st.session_state[confirm_key] = False
     if not st.session_state[confirm_key]:
@@ -433,9 +789,7 @@ def _confirmar_y_borrar(mensaje: str, accion, confirm_key: str):
 
 def _borrar_grupo(grupo_id: str):
     supabase = get_supabase()
-    # Borrar miembros del grupo
     supabase.table("grupos_estudiantes").delete().eq("grupo_id", grupo_id).execute()
-    # Borrar el grupo
     supabase.table("grupos").delete().eq("id", grupo_id).execute()
 
 
