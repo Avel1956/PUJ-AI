@@ -1,8 +1,16 @@
-"""pages_docente.py — Dashboard del docente: estudiantes, grupos, tracking, mensajes, descargas."""
+"""pages_docente.py — Dashboard del docente: estudiantes, grupos, tracking, mensajes, descargas, chat."""
 import streamlit as st
 import datetime
 import json
+import uuid
 from auth import usuario_actual, get_supabase, get_supabase_admin, crear_usuario_estudiante
+from rag_engine import GestorAsignaturas
+from chat_core import (
+    get_modelo_activo,
+    inicializar_motor_rag,
+    responder,
+    crear_conversacion,
+)
 
 
 def render_dashboard_docente():
@@ -14,12 +22,12 @@ def render_dashboard_docente():
     # Manejar navegación desde botones "Ver conversaciones"
     tab_idx = _resolver_tab_inicial()
 
-    tab1, tab2, tab3, tab4, tab5 = st.tabs([
-        "👥 Estudiantes", "👥 Grupos", "📊 Tracking", "📬 Mensajes", "📥 Descargas"
+    tab1, tab2, tab3, tab4, tab5, tab6 = st.tabs([
+        "👥 Estudiantes", "👥 Grupos", "📊 Tracking", "📬 Mensajes", "📥 Descargas", "💬 Chat"
     ])
 
     # Streamlit no permite setear tab activo directamente, usamos query params
-    tab_labels = ["👥 Estudiantes", "👥 Grupos", "📊 Tracking", "📬 Mensajes", "📥 Descargas"]
+    tab_labels = ["👥 Estudiantes", "👥 Grupos", "📊 Tracking", "📬 Mensajes", "📥 Descargas", "💬 Chat"]
 
     with tab1:
         _tab_estudiantes(usuario)
@@ -31,6 +39,8 @@ def render_dashboard_docente():
         _tab_mensajes(usuario)
     with tab5:
         _tab_descargas(usuario)
+    with tab6:
+        _tab_chat_docente(usuario)
 
 
 def _resolver_tab_inicial() -> int:
@@ -857,3 +867,78 @@ def _nombre_destino(msg, supabase) -> str:
         g_resp = supabase.table("grupos").select("nombre").eq("id", msg["para_grupo_id"]).single().execute()
         return f"Grupo: {g_resp.data['nombre']}" if g_resp.data else "?"
     return "?"
+
+
+# ============================================================
+# Tab: Chat (docente prueba el tutor)
+# ============================================================
+def _tab_chat_docente(usuario):
+    st.subheader("💬 Chat con el Tutor")
+
+    # ── Selector de asignatura (inline, no sidebar) ──
+    asignaturas = GestorAsignaturas.listar()
+    if not asignaturas:
+        st.info("No hay cursos configurados. Agregue prompts en la carpeta asignaturas/")
+        return
+
+    opciones = {GestorAsignaturas.nombre_legible(a): a for a in asignaturas}
+    sel = st.selectbox(
+        "📖 Asignatura para probar",
+        options=list(opciones.keys()),
+        key="sel_asignatura_docente",
+    )
+    asignatura = opciones[sel]
+
+    modelo_actual = get_modelo_activo()
+    st.caption(f"🧠 Modelo activo: **{modelo_actual}** — configurado por el administrador")
+
+    st.divider()
+
+    # ── Inicializar estado ──
+    chat_key = f"chat_docente_{asignatura}"
+    if f"{chat_key}_messages" not in st.session_state:
+        st.session_state[f"{chat_key}_messages"] = []
+    if f"{chat_key}_session_id" not in st.session_state:
+        st.session_state[f"{chat_key}_session_id"] = uuid.uuid4().hex[:12]
+
+    messages = st.session_state[f"{chat_key}_messages"]
+    session_id = st.session_state[f"{chat_key}_session_id"]
+
+    # Motor RAG
+    motor = inicializar_motor_rag(asignatura)
+
+    # Mostrar historial
+    for msg in messages:
+        with st.chat_message(msg["role"]):
+            st.markdown(msg["content"])
+
+    # Input
+    if prompt := st.chat_input("Escribe tu pregunta como docente...", key=f"chat_input_docente_{asignatura}"):
+        messages.append({"role": "user", "content": prompt})
+        with st.chat_message("user"):
+            st.markdown(prompt)
+
+        with st.chat_message("assistant"):
+            try:
+                # Reemplazar temporalmente st.session_state.messages
+                old_messages = st.session_state.get("messages")
+                old_session = st.session_state.get("session_id")
+                st.session_state.messages = messages
+                st.session_state.session_id = session_id
+                if f"conv_docente_{asignatura}" not in st.session_state:
+                    st.session_state.conversacion_activa = crear_conversacion(usuario, asignatura)
+                    st.session_state[f"conv_docente_{asignatura}"] = True
+
+                responder(prompt, motor, asignatura, usuario)
+            except Exception as e:
+                st.error(f"❌ Error: {e}")
+                import traceback
+                with st.expander("🔍 Detalles técnicos"):
+                    st.code(traceback.format_exc())
+            finally:
+                # Restaurar (no hay mensajes globales que restaurar si era None)
+                st.session_state[f"{chat_key}_messages"] = st.session_state.messages
+                st.session_state[f"{chat_key}_session_id"] = st.session_state.session_id
+                if old_messages is not None:
+                    st.session_state.messages = old_messages
+                    st.session_state.session_id = old_session

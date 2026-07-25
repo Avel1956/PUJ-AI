@@ -1,9 +1,17 @@
-"""pages_admin.py — Panel de administración: docentes, modelos, logs, sistema."""
+"""pages_admin.py — Panel de administración: docentes, modelos, logs, sistema, chat."""
 import streamlit as st
 import datetime
 import json
+import uuid
 from auth import usuario_actual, get_supabase, get_supabase_admin, crear_usuario_docente
 from config import MODELOS_DISPONIBLES, MODELO_POR_DEFECTO
+from rag_engine import GestorAsignaturas
+from chat_core import (
+    get_modelo_activo,
+    inicializar_motor_rag,
+    responder,
+    crear_conversacion,
+)
 
 
 def render_dashboard_admin():
@@ -12,8 +20,8 @@ def render_dashboard_admin():
     st.title(f"⚙️ Panel de Administración")
     st.caption(f"{usuario.nombre} — Administrador del Sistema")
 
-    tab1, tab2, tab3, tab4, tab5 = st.tabs([
-        "👨‍🏫 Docentes", "👥 Estudiantes", "🧠 Modelos", "📊 Estadísticas", "📥 Datos"
+    tab1, tab2, tab3, tab4, tab5, tab6 = st.tabs([
+        "👨‍🏫 Docentes", "👥 Estudiantes", "🧠 Modelos", "📊 Estadísticas", "📥 Datos", "💬 Chat"
     ])
 
     with tab1:
@@ -26,6 +34,8 @@ def render_dashboard_admin():
         _tab_estadisticas()
     with tab5:
         _tab_datos()
+    with tab6:
+        _tab_chat_admin(usuario)
 
 
 # ============================================================
@@ -636,3 +646,71 @@ def _restaurar_desde_jsonl(lineas: list[str]) -> tuple[int, list]:
             errores.append(f"Línea {i + 1}: {e}")
 
     return ok, errores
+
+
+# ============================================================
+# Tab: Chat (admin prueba el tutor)
+# ============================================================
+def _tab_chat_admin(usuario):
+    st.subheader("💬 Chat con el Tutor")
+
+    asignaturas = GestorAsignaturas.listar()
+    if not asignaturas:
+        st.info("No hay cursos configurados. Agregue prompts en la carpeta asignaturas/")
+        return
+
+    opciones = {GestorAsignaturas.nombre_legible(a): a for a in asignaturas}
+    sel = st.selectbox(
+        "📖 Asignatura para probar",
+        options=list(opciones.keys()),
+        key="sel_asignatura_admin",
+    )
+    asignatura = opciones[sel]
+
+    modelo_actual = get_modelo_activo()
+    st.caption(f"🧠 Modelo activo: **{modelo_actual}** — usted lo configuró en la pestaña 🧠 Modelos")
+
+    st.divider()
+
+    chat_key = f"chat_admin_{asignatura}"
+    if f"{chat_key}_messages" not in st.session_state:
+        st.session_state[f"{chat_key}_messages"] = []
+    if f"{chat_key}_session_id" not in st.session_state:
+        st.session_state[f"{chat_key}_session_id"] = uuid.uuid4().hex[:12]
+
+    messages = st.session_state[f"{chat_key}_messages"]
+    session_id = st.session_state[f"{chat_key}_session_id"]
+
+    motor = inicializar_motor_rag(asignatura)
+
+    for msg in messages:
+        with st.chat_message(msg["role"]):
+            st.markdown(msg["content"])
+
+    if prompt := st.chat_input("Escribe tu pregunta como admin...", key=f"chat_input_admin_{asignatura}"):
+        messages.append({"role": "user", "content": prompt})
+        with st.chat_message("user"):
+            st.markdown(prompt)
+
+        with st.chat_message("assistant"):
+            try:
+                old_messages = st.session_state.get("messages")
+                old_session = st.session_state.get("session_id")
+                st.session_state.messages = messages
+                st.session_state.session_id = session_id
+                if f"conv_admin_{asignatura}" not in st.session_state:
+                    st.session_state.conversacion_activa = crear_conversacion(usuario, asignatura)
+                    st.session_state[f"conv_admin_{asignatura}"] = True
+
+                responder(prompt, motor, asignatura, usuario)
+            except Exception as e:
+                st.error(f"❌ Error: {e}")
+                import traceback
+                with st.expander("🔍 Detalles técnicos"):
+                    st.code(traceback.format_exc())
+            finally:
+                st.session_state[f"{chat_key}_messages"] = st.session_state.messages
+                st.session_state[f"{chat_key}_session_id"] = st.session_state.session_id
+                if old_messages is not None:
+                    st.session_state.messages = old_messages
+                    st.session_state.session_id = old_session
