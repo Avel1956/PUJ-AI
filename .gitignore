@@ -1,0 +1,33 @@
+# Streamlit
+.streamlit/secrets.toml
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+
+# Virtualenv
+venv/
+.venv/
+env/
+
+# ChromaDB vector stores (regenerated from source docs)
+.vectorstores/
+
+# Logs locales
+.logs/
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Keys (nunca commitear)
+*.pem
+*.key
+.env
