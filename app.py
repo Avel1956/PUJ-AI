@@ -1,4 +1,4 @@
-"""app.py — Tutor Socrático Universal: Entry Point con Auth + Ruteo por Rol."""
+"""app.py — PUJ-IA: Entry Point con Auth + Ruteo por Rol."""
 import streamlit as st
 
 # Configuración de página — DEBE ser la primera llamada

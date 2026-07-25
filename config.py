@@ -1,4 +1,4 @@
-"""config.py — Configuración centralizada del Tutor Socrático Universal."""
+"""config.py — Configuración centralizada de PUJ-IA."""
 from dataclasses import dataclass, field
 import streamlit as st
 
