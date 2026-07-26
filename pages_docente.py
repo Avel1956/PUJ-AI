@@ -875,70 +875,105 @@ def _nombre_destino(msg, supabase) -> str:
 def _tab_chat_docente(usuario):
     st.subheader("💬 Chat con el Tutor")
 
-    # ── Selector de asignatura (inline, no sidebar) ──
     asignaturas = GestorAsignaturas.listar()
     if not asignaturas:
-        st.info("No hay cursos configurados. Agregue prompts en la carpeta asignaturas/")
+        st.info("No hay cursos configurados.")
         return
 
     opciones = {GestorAsignaturas.nombre_legible(a): a for a in asignaturas}
-    sel = st.selectbox(
-        "📖 Asignatura para probar",
-        options=list(opciones.keys()),
-        key="sel_asignatura_docente",
-    )
+    sel = st.selectbox("📖 Asignatura", list(opciones.keys()), key="sel_asig_doc")
     asignatura = opciones[sel]
 
     modelo_actual = get_modelo_activo()
-    st.caption(f"🧠 Modelo activo: **{modelo_actual}** — configurado por el administrador")
+    st.caption(f"🧠 Modelo: **{modelo_actual}**")
 
-    st.divider()
+    # ── Estado ──
+    chat_key = f"chat_doc_{asignatura}"
+    st.session_state.setdefault(f"{chat_key}_msgs", [])
+    st.session_state.setdefault(f"{chat_key}_sid", uuid.uuid4().hex[:12])
+    st.session_state.setdefault(f"{chat_key}_conv_id", None)
 
-    # ── Inicializar estado ──
-    chat_key = f"chat_docente_{asignatura}"
-    if f"{chat_key}_messages" not in st.session_state:
-        st.session_state[f"{chat_key}_messages"] = []
-    if f"{chat_key}_session_id" not in st.session_state:
-        st.session_state[f"{chat_key}_session_id"] = uuid.uuid4().hex[:12]
+    # ── Layout: columna historial | chat ──
+    col_hist, col_chat = st.columns([1, 3])
 
-    messages = st.session_state[f"{chat_key}_messages"]
-    session_id = st.session_state[f"{chat_key}_session_id"]
+    with col_hist:
+        st.markdown("**📋 Historial**")
+        supabase = get_supabase()
+        convs_resp = (
+            supabase.table("conversaciones")
+            .select("id,titulo,created_at")
+            .eq("estudiante_id", usuario.id)
+            .eq("asignatura", asignatura)
+            .order("created_at", desc=True)
+            .limit(30)
+            .execute()
+        )
 
-    # Motor RAG
-    motor = inicializar_motor_rag(asignatura)
+        if st.button("➕ Nueva conversación", key=f"nueva_conv_doc_{asignatura}", use_container_width=True):
+            st.session_state[f"{chat_key}_msgs"] = []
+            st.session_state[f"{chat_key}_sid"] = uuid.uuid4().hex[:12]
+            st.session_state[f"{chat_key}_conv_id"] = None
+            if f"conv_flag_doc_{asignatura}" in st.session_state:
+                del st.session_state[f"conv_flag_doc_{asignatura}"]
+            st.rerun()
 
-    # Mostrar historial
-    for msg in messages:
-        with st.chat_message(msg["role"]):
-            st.markdown(msg["content"])
+        if convs_resp.data:
+            for c in convs_resp.data:
+                label = f"{c['titulo'][:40]} — {c['created_at'][:10]}"
+                if st.button(label, key=f"load_conv_doc_{c['id']}", use_container_width=True):
+                    # Cargar mensajes de esta conversación
+                    msgs_resp = (
+                        supabase.table("mensajes")
+                        .select("rol,contenido")
+                        .eq("conversacion_id", c["id"])
+                        .order("created_at")
+                        .execute()
+                    )
+                    st.session_state[f"{chat_key}_msgs"] = [
+                        {"role": m["rol"], "content": m["contenido"]}
+                        for m in (msgs_resp.data or [])
+                    ]
+                    st.session_state[f"{chat_key}_conv_id"] = c["id"]
+                    if f"conv_flag_doc_{asignatura}" not in st.session_state:
+                        st.session_state[f"conv_flag_doc_{asignatura}"] = True
+                    st.rerun()
+        else:
+            st.caption("Sin conversaciones aún.")
 
-    # Input
-    if prompt := st.chat_input("Escribe tu pregunta como docente...", key=f"chat_input_docente_{asignatura}"):
-        messages.append({"role": "user", "content": prompt})
-        with st.chat_message("user"):
-            st.markdown(prompt)
+    with col_chat:
+        messages = st.session_state[f"{chat_key}_msgs"]
+        session_id = st.session_state[f"{chat_key}_sid"]
+        motor = inicializar_motor_rag(asignatura)
 
-        with st.chat_message("assistant"):
-            try:
-                # Reemplazar temporalmente st.session_state.messages
-                old_messages = st.session_state.get("messages")
-                old_session = st.session_state.get("session_id")
-                st.session_state.messages = messages
-                st.session_state.session_id = session_id
-                if f"conv_docente_{asignatura}" not in st.session_state:
-                    st.session_state.conversacion_activa = crear_conversacion(usuario, asignatura)
-                    st.session_state[f"conv_docente_{asignatura}"] = True
+        for msg in messages:
+            with st.chat_message(msg["role"]):
+                st.markdown(msg["content"])
 
-                responder(prompt, motor, asignatura, usuario)
-            except Exception as e:
-                st.error(f"❌ Error: {e}")
-                import traceback
-                with st.expander("🔍 Detalles técnicos"):
-                    st.code(traceback.format_exc())
-            finally:
-                # Restaurar (no hay mensajes globales que restaurar si era None)
-                st.session_state[f"{chat_key}_messages"] = st.session_state.messages
-                st.session_state[f"{chat_key}_session_id"] = st.session_state.session_id
-                if old_messages is not None:
-                    st.session_state.messages = old_messages
-                    st.session_state.session_id = old_session
+        if prompt := st.chat_input("Escribe tu pregunta...", key=f"chat_in_doc_{asignatura}"):
+            messages.append({"role": "user", "content": prompt})
+            with st.chat_message("user"):
+                st.markdown(prompt)
+
+            with st.chat_message("assistant"):
+                try:
+                    old_msgs = st.session_state.get("messages")
+                    old_sid = st.session_state.get("session_id")
+                    st.session_state.messages = messages
+                    st.session_state.session_id = session_id
+
+                    if f"conv_flag_doc_{asignatura}" not in st.session_state:
+                        st.session_state.conversacion_activa = crear_conversacion(usuario, asignatura)
+                        st.session_state[f"conv_flag_doc_{asignatura}"] = True
+
+                    responder(prompt, motor, asignatura, usuario)
+                except Exception as e:
+                    st.error(f"❌ Error: {e}")
+                    import traceback
+                    with st.expander("🔍 Detalles"):
+                        st.code(traceback.format_exc())
+                finally:
+                    st.session_state[f"{chat_key}_msgs"] = st.session_state.messages
+                    st.session_state[f"{chat_key}_sid"] = st.session_state.session_id
+                    if old_msgs is not None:
+                        st.session_state.messages = old_msgs
+                        st.session_state.session_id = old_sid
