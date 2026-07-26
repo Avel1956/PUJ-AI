@@ -10,6 +10,8 @@ from chat_core import (
     inicializar_motor_rag,
     responder,
     crear_conversacion,
+    cargar_conversacion_callback,
+    nueva_conversacion_callback,
 )
 
 
@@ -887,13 +889,11 @@ def _tab_chat_docente(usuario):
     modelo_actual = get_modelo_activo()
     st.caption(f"🧠 Modelo: **{modelo_actual}**")
 
-    # ── Estado ──
     chat_key = f"chat_doc_{asignatura}"
     st.session_state.setdefault(f"{chat_key}_msgs", [])
     st.session_state.setdefault(f"{chat_key}_sid", uuid.uuid4().hex[:12])
     st.session_state.setdefault(f"{chat_key}_conv_id", None)
 
-    # ── Layout: columna historial | chat ──
     col_hist, col_chat = st.columns([1, 3])
 
     with col_hist:
@@ -909,34 +909,27 @@ def _tab_chat_docente(usuario):
             .execute()
         )
 
-        if st.button("➕ Nueva conversación", key=f"nueva_conv_doc_{asignatura}", use_container_width=True):
-            st.session_state[f"{chat_key}_msgs"] = []
-            st.session_state[f"{chat_key}_sid"] = uuid.uuid4().hex[:12]
-            st.session_state[f"{chat_key}_conv_id"] = None
-            if f"conv_flag_doc_{asignatura}" in st.session_state:
-                del st.session_state[f"conv_flag_doc_{asignatura}"]
-            st.rerun()
+        st.button(
+            "➕ Nueva conversación",
+            key=f"nueva_conv_doc_{asignatura}",
+            on_click=nueva_conversacion_callback,
+            args=(chat_key,),
+            use_container_width=True,
+        )
 
         if convs_resp.data:
             for c in convs_resp.data:
                 label = f"{c['titulo'][:40]} — {c['created_at'][:10]}"
-                if st.button(label, key=f"load_conv_doc_{c['id']}", use_container_width=True):
-                    # Cargar mensajes de esta conversación
-                    msgs_resp = (
-                        supabase.table("mensajes")
-                        .select("rol,contenido")
-                        .eq("conversacion_id", c["id"])
-                        .order("created_at")
-                        .execute()
-                    )
-                    st.session_state[f"{chat_key}_msgs"] = [
-                        {"role": m["rol"], "content": m["contenido"]}
-                        for m in (msgs_resp.data or [])
-                    ]
-                    st.session_state[f"{chat_key}_conv_id"] = c["id"]
-                    if f"conv_flag_doc_{asignatura}" not in st.session_state:
-                        st.session_state[f"conv_flag_doc_{asignatura}"] = True
-                    st.rerun()
+                activo = st.session_state.get(f"{chat_key}_conv_id") == c["id"]
+                prefix = "▸ " if activo else ""
+                st.button(
+                    f"{prefix}{label}",
+                    key=f"load_conv_doc_{c['id']}",
+                    on_click=cargar_conversacion_callback,
+                    args=(c["id"], chat_key),
+                    use_container_width=True,
+                    type="primary" if activo else "secondary",
+                )
         else:
             st.caption("Sin conversaciones aún.")
 
@@ -961,9 +954,9 @@ def _tab_chat_docente(usuario):
                     st.session_state.messages = messages
                     st.session_state.session_id = session_id
 
-                    if f"conv_flag_doc_{asignatura}" not in st.session_state:
+                    if f"activa_{chat_key}" not in st.session_state:
                         st.session_state.conversacion_activa = crear_conversacion(usuario, asignatura)
-                        st.session_state[f"conv_flag_doc_{asignatura}"] = True
+                        st.session_state[f"activa_{chat_key}"] = True
 
                     responder(prompt, motor, asignatura, usuario)
                 except Exception as e:

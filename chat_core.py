@@ -182,3 +182,36 @@ def crear_conversacion(usuario, asignatura: str) -> str:
     except Exception:
         pass
     return f"local-{uuid.uuid4().hex[:8]}"
+
+
+# ============================================================
+# Callbacks para botones de historial (usados en chat docente/admin)
+# ============================================================
+def cargar_conversacion_callback(conv_id, chat_key):
+    """Carga mensajes de una conversación previa en session_state."""
+    import streamlit as st
+    from auth import get_supabase
+    supabase = get_supabase()
+    msgs_resp = (
+        supabase.table("mensajes")
+        .select("rol,contenido")
+        .eq("conversacion_id", conv_id)
+        .order("created_at")
+        .execute()
+    )
+    st.session_state[f"{chat_key}_msgs"] = [
+        {"role": m["rol"], "content": m["contenido"]}
+        for m in (msgs_resp.data or [])
+    ]
+    st.session_state[f"{chat_key}_conv_id"] = conv_id
+    st.session_state[f"activa_{chat_key}"] = True
+
+
+def nueva_conversacion_callback(chat_key):
+    """Limpia el chat actual para empezar una conversación nueva."""
+    import streamlit as st
+    import uuid
+    st.session_state[f"{chat_key}_msgs"] = []
+    st.session_state[f"{chat_key}_sid"] = uuid.uuid4().hex[:12]
+    st.session_state[f"{chat_key}_conv_id"] = None
+    st.session_state.pop(f"activa_{chat_key}", None)
