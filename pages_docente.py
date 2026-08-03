@@ -3,6 +3,11 @@ import streamlit as st
 import datetime
 import json
 import uuid
+import io
+import csv
+import random
+import string
+import pandas as pd
 from auth import usuario_actual, get_supabase, get_supabase_admin, crear_usuario_estudiante
 from rag_engine import GestorAsignaturas
 from chat_core import (
@@ -80,6 +85,95 @@ def _tab_estudiantes(usuario):
                     st.error(msg)
             else:
                 st.warning("Complete todos los campos.")
+
+    # --- Carga masiva de estudiantes ---
+    with st.expander("📋 Subir estudiantes (Excel/CSV)", expanded=False):
+        st.markdown(
+            "Sube un archivo con las columnas **`nombre`**, **`email`** (requeridas) y "
+            "**`grupo`** (opcional). Se generarán contraseñas aleatorias para cada estudiante."
+        )
+        st.markdown(
+            "> 📎 [Descargar plantilla vacía](#) — Formato: `nombre`, `email`, `grupo`"
+        )
+
+        archivo = st.file_uploader(
+            "Seleccionar archivo",
+            type=["csv", "xlsx"],
+            key="upload_estudiantes",
+        )
+
+        if archivo is not None:
+            try:
+                if archivo.name.endswith(".csv"):
+                    df = pd.read_csv(archivo, dtype=str).fillna("")
+                else:
+                    df = pd.read_excel(archivo, dtype=str).fillna("")
+            except Exception as e:
+                st.error(f"❌ Error al leer el archivo: {e}")
+                df = None
+
+            if df is not None and not df.empty:
+                # Normalizar columnas
+                df.columns = [c.strip().lower() for c in df.columns]
+                requeridas = {"nombre", "email"}
+                faltantes = requeridas - set(df.columns)
+                if faltantes:
+                    st.error(f"❌ Faltan columnas requeridas: {', '.join(faltantes)}. Columnas detectadas: {', '.join(df.columns)}")
+                else:
+                    st.success(f"✅ {len(df)} estudiantes detectados")
+                    st.dataframe(df[["nombre", "email"] + (["grupo"] if "grupo" in df.columns else [])], use_container_width=True)
+
+                    if st.button("🚀 Crear todos los estudiantes", type="primary", key="btn_crear_masivo"):
+                        resultados = []
+                        credenciales = []
+                        bar = st.progress(0, text="Creando estudiantes...")
+                        total = len(df)
+                        for i, row in df.iterrows():
+                            nombre = str(row["nombre"]).strip()
+                            email = str(row["email"]).strip()
+                            grupo = str(row.get("grupo", "")).strip()
+                            password = _generar_password()
+                            ok, msg = crear_usuario_estudiante(email, password, nombre)
+                            resultados.append({"nombre": nombre, "email": email, "ok": ok, "msg": msg, "password": password, "grupo": grupo})
+                            credenciales.append({"nombre": nombre, "email": email, "password": password, "grupo": grupo})
+                            bar.progress((i + 1) / total, text=f"{i + 1}/{total}: {nombre}")
+
+                        bar.empty()
+                        creados = sum(1 for r in resultados if r["ok"])
+                        fallidos = total - creados
+
+                        if creados > 0:
+                            st.success(f"✅ {creados} estudiantes creados correctamente.")
+                        if fallidos > 0:
+                            st.warning(f"⚠️ {fallidos} errores (estudiantes que quizás ya existen).")
+
+                        # Mostrar tabla de resultados
+                        res_df = pd.DataFrame(resultados)
+                        st.dataframe(
+                            res_df[["nombre", "email", "ok", "msg"]].rename(
+                                columns={"ok": "Éxito", "msg": "Mensaje"}
+                            ),
+                            use_container_width=True,
+                        )
+
+                        # Ofrecer descarga de credenciales
+                        csv_buf = io.StringIO()
+                        writer = csv.writer(csv_buf)
+                        writer.writerow(["nombre", "email", "password", "grupo"])
+                        for c in credenciales:
+                            writer.writerow([c["nombre"], c["email"], c["password"], c["grupo"]])
+                        csv_data = csv_buf.getvalue()
+
+                        st.download_button(
+                            label="📥 Descargar credenciales (CSV)",
+                            data=csv_data,
+                            file_name=f"credenciales_estudiantes_{datetime.date.today().isoformat()}.csv",
+                            mime="text/csv",
+                        )
+
+                        # Guardar en session_state para la pestaña de descargas
+                        st.session_state._ultimas_credenciales = credenciales
+                        st.session_state._ultima_fecha_credenciales = datetime.date.today().isoformat()
 
     # --- Lista de estudiantes ---
     st.subheader("📋 Lista de estudiantes")
@@ -553,6 +647,89 @@ def _tab_descargas(usuario):
                 jsonl = _generar_jsonl_asignatura(asig_sel, usuario.id)
                 _ofrecer_descarga(jsonl, f"asignatura_{asig_sel}.jsonl")
 
+    # --- Lista de estudiantes (CSV con claves) ---
+    st.divider()
+    st.subheader("🧑‍🤝‍🧑 Lista de estudiantes con credenciales")
+    creds_disponibles = (
+        st.session_state.get("_ultimas_credenciales") is not None
+        or st.button("🔍 Generar lista de estudiantes", key="btn_gen_lista_est")
+    )
+    if creds_disponibles:
+        # Si hay credenciales de la última carga masiva, usarlas
+        if st.session_state.get("_ultimas_credenciales"):
+            fecha = st.session_state.get("_ultima_fecha_credenciales", "?")
+            st.info(f"📋 Credenciales de la carga masiva del {fecha}")
+            csv_buf = io.StringIO()
+            writer = csv.writer(csv_buf)
+            writer.writerow(["nombre", "email", "password", "grupo"])
+            for c in st.session_state._ultimas_credenciales:
+                writer.writerow([c["nombre"], c["email"], c["password"], c["grupo"]])
+            st.download_button(
+                label="📥 Descargar credenciales (CSV)",
+                data=csv_buf.getvalue(),
+                file_name=f"credenciales_estudiantes_{fecha}.csv",
+                mime="text/csv",
+            )
+        else:
+            # Generar desde DB (sin passwords — no se almacenan)
+            supabase = get_supabase()
+            est_resp = (
+                supabase.table("profiles")
+                .select("nombre, email, created_at")
+                .eq("rol", "estudiante")
+                .order("nombre")
+                .execute()
+            )
+            if est_resp.data:
+                csv_buf = io.StringIO()
+                writer = csv.writer(csv_buf)
+                writer.writerow(["nombre", "email", "password", "fecha_registro"])
+                for e in est_resp.data:
+                    writer.writerow([
+                        e["nombre"], e["email"],
+                        "— (solo disponible al crear)",
+                        e.get("created_at", "")[:10] if e.get("created_at") else "",
+                    ])
+                st.download_button(
+                    label="📥 Descargar lista de estudiantes (CSV)",
+                    data=csv_buf.getvalue(),
+                    file_name=f"lista_estudiantes_{datetime.date.today().isoformat()}.csv",
+                    mime="text/csv",
+                )
+                st.caption("💡 Las contraseñas solo se muestran al crear los estudiantes. Para estudiantes ya existentes, use 'Restablecer contraseña'.")
+            else:
+                st.info("No hay estudiantes registrados.")
+
+    # --- Lista de grupos con estudiantes ---
+    st.divider()
+    st.subheader("👥 Grupos con estudiantes")
+    if st.button("📥 Descargar lista de grupos (CSV)", key="btn_dl_grupos_csv"):
+        supabase = get_supabase()
+        grupos_resp = (
+            supabase.table("grupos")
+            .select("id, nombre, asignatura, descripcion")
+            .eq("creado_por", usuario.id)
+            .order("nombre")
+            .execute()
+        )
+        csv_buf = io.StringIO()
+        writer = csv.writer(csv_buf)
+        writer.writerow(["grupo", "asignatura", "estudiante_nombre", "estudiante_email"])
+        for g in (grupos_resp.data or []):
+            miembros = (
+                supabase.table("grupos_estudiantes")
+                .select("estudiante_id, profiles!estudiante_id(nombre, email)")
+                .eq("grupo_id", g["id"])
+                .execute()
+            )
+            for m in (miembros.data or []):
+                p = m.get("profiles", {})
+                if isinstance(p, dict):
+                    writer.writerow([g["nombre"], g.get("asignatura", ""), p.get("nombre", "?"), p.get("email", "?")])
+                else:
+                    writer.writerow([g["nombre"], g.get("asignatura", ""), "?", "?"])
+        _ofrecer_descarga(csv_buf.getvalue(), f"grupos_estudiantes_{datetime.date.today().isoformat()}.csv", "📥 Descargar grupos (CSV)")
+
     # --- Preview ---
     st.divider()
     st.subheader("🔍 Formato de ejemplo")
@@ -869,6 +1046,12 @@ def _nombre_destino(msg, supabase) -> str:
         g_resp = supabase.table("grupos").select("nombre").eq("id", msg["para_grupo_id"]).single().execute()
         return f"Grupo: {g_resp.data['nombre']}" if g_resp.data else "?"
     return "?"
+
+
+def _generar_password(length: int = 10) -> str:
+    """Genera una contraseña aleatoria alfanumérica fácil de leer (sin confusos)."""
+    chars = ''.join(c for c in string.ascii_letters + string.digits if c not in '0O1Il')
+    return ''.join(random.choice(chars) for _ in range(length))
 
 
 # ============================================================
