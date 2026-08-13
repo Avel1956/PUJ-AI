@@ -56,7 +56,7 @@ def _render_login_page():
     st.title("🎓 PUJ-IA")
     st.caption("Asistente pedagógico para estudiantes de ingeniería — Pontificia Universidad Javeriana Cali")
 
-    tab_login, tab_signup = st.tabs(["🔑 Iniciar sesión", "📝 Registrarse"])
+    tab_login = st.tabs(["🔑 Iniciar sesión"])[0]
 
     with tab_login:
         st.subheader("Iniciar sesión")
@@ -73,32 +73,14 @@ def _render_login_page():
             else:
                 st.warning("Ingrese email y contraseña.")
 
-    with tab_signup:
-        st.subheader("Registro de estudiante")
-        st.caption("Solo para estudiantes. Si es docente, solicite acceso al administrador.")
-
-        col1, col2 = st.columns(2)
-        with col1:
-            nombre = st.text_input("Nombre completo", key="signup_nombre")
-        with col2:
-            email = st.text_input("Email", key="signup_email")
-
-        password = st.text_input("Contraseña", type="password", key="signup_password")
-        password2 = st.text_input("Confirmar contraseña", type="password", key="signup_password2")
-
-        if st.button("Registrarse", type="primary", key="btn_signup"):
-            if not nombre or not email or not password:
-                st.warning("Complete todos los campos.")
-            elif password != password2:
-                st.error("Las contraseñas no coinciden.")
-            elif len(password) < 6:
-                st.error("La contraseña debe tener al menos 6 caracteres.")
-            else:
-                ok, msg = signup(email, password, nombre)
-                if ok:
-                    st.success(msg)
-                else:
-                    st.error(msg)
+    # El registro de estudiantes solo está disponible para docentes desde su panel.
+    st.info("📝 **¿Eres estudiante?** Tu profesor debe crear tu cuenta e indicarte tus credenciales de acceso.")
+    st.markdown("")
+    with st.expander("ℹ️ ¿Olvidaste tu contraseña?"):
+        st.markdown(
+            "Comunícate con tu profesor para restablecerla. "
+            "Los docentes pueden crear nuevas credenciales desde su panel de administración."
+        )
 
 
 # ============================================================
