@@ -21,6 +21,8 @@ CREATE TABLE IF NOT EXISTS profiles (
     nombre TEXT NOT NULL DEFAULT '',
     rol TEXT NOT NULL DEFAULT 'estudiante'
         CHECK (rol IN ('estudiante', 'docente', 'admin')),
+    creado_por UUID REFERENCES profiles(id) ON DELETE SET NULL,
+    asignatura TEXT NOT NULL DEFAULT '',
     created_at TIMESTAMPTZ DEFAULT NOW(),
     updated_at TIMESTAMPTZ DEFAULT NOW()
 );
@@ -205,12 +207,20 @@ CREATE POLICY "Admin borra perfiles" ON profiles
         AND id != auth.uid()
     );
 
--- Docente puede borrar perfiles de estudiantes
+-- Docente puede borrar SOLO los estudiantes que él creó
 CREATE POLICY "Docente borra estudiantes" ON profiles
     FOR DELETE USING (
         (SELECT rol FROM profiles WHERE id = auth.uid()) = 'docente'
-        AND (SELECT rol FROM profiles WHERE id = profiles.id) = 'estudiante'
+        AND creado_por = auth.uid()
     );
+
+-- Docente ve los estudiantes que él creó
+CREATE POLICY "Docente ve sus estudiantes" ON profiles
+    FOR SELECT USING (creado_por = auth.uid());
+
+-- Docente actualiza el perfil de sus estudiantes
+CREATE POLICY "Docente actualiza sus estudiantes" ON profiles
+    FOR UPDATE USING (creado_por = auth.uid());
 -- Docente borra sus propios grupos, admin borra cualquier grupo
 CREATE POLICY "Docente borra sus grupos" ON grupos
     FOR DELETE USING (creado_por = auth.uid());
@@ -286,12 +296,14 @@ CREATE POLICY "Admin borra config" ON config_sistema
 CREATE OR REPLACE FUNCTION public.handle_new_user()
 RETURNS TRIGGER AS $$
 BEGIN
-    INSERT INTO public.profiles (id, email, nombre, rol)
+    INSERT INTO public.profiles (id, email, nombre, rol, creado_por, asignatura)
     VALUES (
         NEW.id,
         NEW.email,
         COALESCE(NEW.raw_user_meta_data->>'nombre', split_part(NEW.email, '@', 1)),
-        COALESCE(NEW.raw_user_meta_data->>'rol', 'estudiante')
+        COALESCE(NEW.raw_user_meta_data->>'rol', 'estudiante'),
+        NULLIF(NEW.raw_user_meta_data->>'creado_por', '')::uuid,
+        COALESCE(NEW.raw_user_meta_data->>'asignatura', '')
     );
     RETURN NEW;
 END;
@@ -305,6 +317,8 @@ CREATE TRIGGER on_auth_user_created
 
 -- 10. ÍNDICES
 CREATE INDEX IF NOT EXISTS idx_profiles_rol ON profiles(rol);
+CREATE INDEX IF NOT EXISTS idx_profiles_creado_por ON profiles(creado_por);
+CREATE INDEX IF NOT EXISTS idx_profiles_asignatura ON profiles(asignatura);
 CREATE INDEX IF NOT EXISTS idx_grupos_creador ON grupos(creado_por);
 CREATE INDEX IF NOT EXISTS idx_grupos_estudiantes_grupo ON grupos_estudiantes(grupo_id);
 CREATE INDEX IF NOT EXISTS idx_grupos_estudiantes_estudiante ON grupos_estudiantes(estudiante_id);
