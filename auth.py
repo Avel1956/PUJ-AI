@@ -116,17 +116,43 @@ def crear_usuario_docente(email: str, password: str, nombre: str) -> tuple[bool,
         return False, str(e)[:200]
 
 
-def crear_usuario_estudiante(email: str, password: str, nombre: str) -> tuple[bool, str]:
-    """Docente crea estudiantes. Usa service_role."""
+def _email_con_alias(email: str, asignatura: str) -> str:
+    """Convierte ana@correo.com en ana+curso@correo.com (subaddressing).
+
+    Permite que un mismo estudiante tenga una cuenta (y clave) distinta por curso,
+    sin colisionar con el email único que exige Supabase Auth.
+    Si el email ya lleva un '+' o no hay asignatura, se devuelve sin cambios.
+    """
+    email = (email or "").strip().lower()
+    if not email or "@" not in email:
+        return email
+    if not asignatura:
+        return email
+    local, dominio = email.rsplit("@", 1)
+    if "+" in local:
+        return email
+    slug = asignatura.strip().lower().replace(" ", "-")
+    return f"{local}+{slug}@{dominio}"
+
+
+def crear_usuario_estudiante(email: str, password: str, nombre: str,
+                             docente_id: str = "", asignatura: str = "") -> tuple[bool, str]:
+    """Docente crea estudiantes. Usa service_role y vincula (creado_por, asignatura)."""
     try:
         supabase = get_supabase_admin()
+        email_efectivo = _email_con_alias(email, asignatura)
         resp = supabase.auth.admin.create_user({
-            "email": email,
+            "email": email_efectivo,
             "password": password,
             "email_confirm": True,
-            "user_metadata": {"nombre": nombre, "rol": "estudiante"},
+            "user_metadata": {
+                "nombre": nombre,
+                "rol": "estudiante",
+                "creado_por": docente_id,
+                "asignatura": asignatura,
+            },
         })
-        return True, f"Estudiante {nombre} creado."
+        return True, f"Estudiante {nombre} creado (cuenta: {email_efectivo})."
     except Exception as e:
         return False, str(e)[:200]
 

@@ -8,7 +8,7 @@ import csv
 import random
 import string
 import pandas as pd
-from auth import usuario_actual, get_supabase, get_supabase_admin, crear_usuario_estudiante
+from auth import usuario_actual, get_supabase, get_supabase_admin, crear_usuario_estudiante, _email_con_alias
 from rag_engine import GestorAsignaturas
 from chat_core import (
     get_modelo_activo,
@@ -59,11 +59,29 @@ def _resolver_tab_inicial() -> int:
     return 0
 
 
+def _asignatura_activa(key_prefix: str = "gestion") -> str:
+    """Determina la asignatura del deploy. Si hay una sola, la usa; si hay varias, selector."""
+    asignaturas = GestorAsignaturas.listar()
+    if not asignaturas:
+        return ""
+    if len(asignaturas) == 1:
+        return asignaturas[0]
+    opciones = {GestorAsignaturas.nombre_legible(a): a for a in asignaturas}
+    sel = st.selectbox("📖 Asignatura", list(opciones.keys()), key=f"sel_asig_{key_prefix}")
+    return opciones[sel]
+
+
 # ============================================================
 # Tab: Gestión de Estudiantes
 # ============================================================
 def _tab_estudiantes(usuario):
     st.subheader("👥 Gestión de Estudiantes")
+
+    asignatura = _asignatura_activa(key_prefix="estudiantes")
+    if not asignatura:
+        st.info("No hay cursos configurados.")
+        return
+    st.caption(f"Curso: **{GestorAsignaturas.nombre_legible(asignatura)}** (`{asignatura}`)")
 
     # --- Crear estudiante ---
     with st.expander("➕ Crear nuevo estudiante", expanded=False):
@@ -77,7 +95,7 @@ def _tab_estudiantes(usuario):
 
         if st.button("Crear estudiante", type="primary"):
             if nombre and email and password:
-                ok, msg = crear_usuario_estudiante(email, password, nombre)
+                ok, msg = crear_usuario_estudiante(email, password, nombre, usuario.id, asignatura)
                 if ok:
                     st.success(msg)
                     st.rerun()
@@ -133,9 +151,10 @@ def _tab_estudiantes(usuario):
                             email = str(row["email"]).strip()
                             grupo = str(row.get("grupo", "")).strip()
                             password = _generar_password()
-                            ok, msg = crear_usuario_estudiante(email, password, nombre)
-                            resultados.append({"nombre": nombre, "email": email, "ok": ok, "msg": msg, "password": password, "grupo": grupo})
-                            credenciales.append({"nombre": nombre, "email": email, "password": password, "grupo": grupo})
+                            ok, msg = crear_usuario_estudiante(email, password, nombre, usuario.id, asignatura)
+                            email_efectivo = _email_con_alias(email, asignatura)
+                            resultados.append({"nombre": nombre, "email": email_efectivo, "ok": ok, "msg": msg, "password": password, "grupo": grupo})
+                            credenciales.append({"nombre": nombre, "email": email_efectivo, "password": password, "grupo": grupo})
                             bar.progress((i + 1) / total, text=f"{i + 1}/{total}: {nombre}")
 
                         bar.empty()
@@ -175,13 +194,15 @@ def _tab_estudiantes(usuario):
                         st.session_state._ultimas_credenciales = credenciales
                         st.session_state._ultima_fecha_credenciales = datetime.date.today().isoformat()
 
-    # --- Lista de estudiantes ---
+    # --- Lista de estudiantes (solo los del docente y del curso actual) ---
     st.subheader("📋 Lista de estudiantes")
     supabase = get_supabase()
     resp = (
         supabase.table("profiles")
         .select("id, email, nombre, created_at")
         .eq("rol", "estudiante")
+        .eq("creado_por", usuario.id)
+        .eq("asignatura", asignatura)
         .order("nombre")
         .execute()
     )
@@ -219,7 +240,7 @@ def _tab_estudiantes(usuario):
                 _confirmar_y_borrar(
                     f"cf_doc_est_{p['id']}",
                     f"¿Eliminar a {p['nombre']} y todas sus conversaciones?",
-                    lambda pid=p["id"]: _borrar_estudiante(pid),
+                    lambda pid=p["id"]: _borrar_estudiante(pid, usuario.id),
                 )
 
 
@@ -230,10 +251,18 @@ def _tab_grupos(usuario):
     st.subheader("👥 Grupos de Trabajo")
     supabase = get_supabase()
 
+    asignatura = _asignatura_activa(key_prefix="grupos")
+    if not asignatura:
+        st.info("No hay cursos configurados.")
+        return
+
+    # Solo estudiantes del docente y del curso actual
     estudiantes = (
         supabase.table("profiles")
         .select("id, nombre, email")
         .eq("rol", "estudiante")
+        .eq("creado_por", usuario.id)
+        .eq("asignatura", asignatura)
         .order("nombre")
         .execute()
     )
@@ -245,9 +274,15 @@ def _tab_grupos(usuario):
         with col1:
             nombre_grp = st.text_input("Nombre del grupo", key="nuevo_grupo_nombre")
         with col2:
-            asignatura_grp = st.text_input("Asignatura", key="nuevo_grupo_asignatura",
-                                           placeholder="ej: mecanica-newtoniana")
+            st.text_input(
+                "Asignatura",
+                value=asignatura,
+                disabled=True,
+                key="nuevo_grupo_asignatura",
+            )
         desc_grp = st.text_area("Descripción", key="nuevo_grupo_desc")
+        if not mapa_estudiantes:
+            st.info("No tiene estudiantes en este curso. Cree estudiantes primero en la pestaña **👥 Estudiantes**.")
         miembros_sel = st.multiselect(
             "Miembros del grupo",
             options=list(mapa_estudiantes.keys()),
@@ -260,7 +295,7 @@ def _tab_grupos(usuario):
                     "nombre": nombre_grp,
                     "descripcion": desc_grp,
                     "creado_por": usuario.id,
-                    "asignatura": asignatura_grp,
+                    "asignatura": asignatura,
                 }).execute()
                 if resp.data:
                     grupo_id = resp.data[0]["id"]
@@ -1024,10 +1059,17 @@ def _borrar_conversacion(conv_id: str):
     supabase.table("conversaciones").delete().eq("id", conv_id).execute()
 
 
-def _borrar_estudiante(estudiante_id: str):
-    """Borra un estudiante y todas sus conversaciones/mensajes."""
+def _borrar_estudiante(estudiante_id: str, docente_id: str = ""):
+    """Borra un estudiante y todas sus conversaciones/mensajes (solo si pertenece al docente)."""
     supabase = get_supabase()
     supabase_admin = get_supabase_admin()
+
+    # Verificación de pertenencia (defensa en profundidad)
+    if docente_id:
+        perfil = supabase.table("profiles").select("creado_por").eq("id", estudiante_id).single().execute()
+        if perfil.data and perfil.data.get("creado_por") and perfil.data["creado_por"] != docente_id:
+            raise PermissionError("No tiene permiso para borrar este estudiante.")
+
     # Borrar mensajes de todas sus conversaciones
     convs = supabase.table("conversaciones").select("id").eq("estudiante_id", estudiante_id).execute()
     for c in (convs.data or []):
