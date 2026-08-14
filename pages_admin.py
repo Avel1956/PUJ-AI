@@ -45,6 +45,8 @@ def render_dashboard_admin():
 # ============================================================
 def _tab_docentes():
     st.subheader("👨‍🏫 Gestión de Docentes")
+    supabase = get_supabase()
+    cursos_disponibles = _cursos_conocidos(supabase)
 
     # --- Crear docente ---
     with st.expander("➕ Registrar nuevo docente", expanded=False):
@@ -56,10 +58,25 @@ def _tab_docentes():
         with col3:
             password = st.text_input("Contraseña inicial", type="password", key="admin_nuevo_docente_pass")
 
+        cursos_sel = st.multiselect(
+            "Cursos asignados",
+            options=cursos_disponibles,
+            format_func=GestorAsignaturas.nombre_legible,
+            key="admin_nuevo_docente_cursos",
+        )
+
         if st.button("Crear docente", type="primary"):
             if nombre and email and password:
                 ok, msg = crear_usuario_docente(email, password, nombre)
                 if ok:
+                    resp_doc = supabase.table("profiles").select("id").eq("email", email.strip().lower()).single().execute()
+                    if resp_doc.data:
+                        doc_id = resp_doc.data["id"]
+                        for curso in cursos_sel:
+                            try:
+                                _asignar_curso_docente(doc_id, curso)
+                            except Exception:
+                                pass
                     st.success(msg)
                     st.rerun()
                 else:
@@ -69,7 +86,6 @@ def _tab_docentes():
 
     # --- Lista de docentes ---
     st.subheader("📋 Docentes registrados")
-    supabase = get_supabase()
     resp = (
         supabase.table("profiles")
         .select("id, email, nombre, created_at")
@@ -82,7 +98,7 @@ def _tab_docentes():
         st.info("No hay docentes registrados aún.")
         return
 
-    for i, p in enumerate(resp.data):
+    for p in resp.data:
         grupos = (
             supabase.table("grupos")
             .select("id", count="exact")
@@ -90,10 +106,43 @@ def _tab_docentes():
             .execute()
         )
         n_grupos = grupos.count if hasattr(grupos, "count") else 0
+        cursos_doc = _cursos_del_docente(p["id"], supabase)
 
         with st.expander(f"👨‍🏫 {p['nombre']} — {p['email']} — {n_grupos} grupos"):
             st.caption(f"ID: {p['id']}")
             st.caption(f"Registrado: {p.get('created_at', '?')}")
+
+            st.markdown("**📖 Cursos asignados:**")
+            if cursos_doc:
+                for c in sorted(cursos_doc):
+                    col_c, col_q = st.columns([6, 1])
+                    with col_c:
+                        st.markdown(f"- {GestorAsignaturas.nombre_legible(c)} (`{c}`)")
+                    with col_q:
+                        if st.button("✖️", key=f"quitar_curso_{p['id']}_{c}", help="Quitar curso"):
+                            _quitar_curso_docente(p["id"], c)
+                            st.rerun()
+            else:
+                st.caption("Ninguno")
+
+            no_asignados = [c for c in cursos_disponibles if c not in cursos_doc]
+            if no_asignados:
+                col_a, col_b = st.columns([4, 1])
+                with col_a:
+                    nuevo_curso = st.selectbox(
+                        "Añadir curso",
+                        options=no_asignados,
+                        format_func=GestorAsignaturas.nombre_legible,
+                        key=f"add_curso_{p['id']}",
+                    )
+                with col_b:
+                    st.write("")
+                    st.write("")
+                    if st.button("➕", key=f"btn_add_curso_{p['id']}", help="Añadir curso"):
+                        _asignar_curso_docente(p["id"], nuevo_curso)
+                        st.rerun()
+
+            st.divider()
             if st.button("🗑️ Eliminar docente", key=f"del_doc_{p['id']}", type="secondary"):
                 st.session_state[f"cf_adm_doc_{p['id']}"] = True
                 st.rerun()
@@ -102,6 +151,39 @@ def _tab_docentes():
                 f"¿Eliminar a {p['nombre']}? Se perderán sus grupos y mensajes.",
                 lambda pid=p["id"]: _borrar_perfil(pid, "docente"),
             )
+
+
+def _cursos_conocidos(supabase) -> list[str]:
+    """Lista de cursos conocidos: carpeta asignaturas + docente_cursos + profiles.asignatura."""
+    cursos = set(GestorAsignaturas.listar())
+    dc = supabase.table("docente_cursos").select("asignatura").execute()
+    for r in (dc.data or []):
+        if r.get("asignatura"):
+            cursos.add(r["asignatura"])
+    pr = supabase.table("profiles").select("asignatura").execute()
+    for r in (pr.data or []):
+        if r.get("asignatura"):
+            cursos.add(r["asignatura"])
+    cursos.discard("")
+    return sorted(cursos)
+
+
+def _cursos_del_docente(docente_id: str, supabase) -> list[str]:
+    resp = supabase.table("docente_cursos").select("asignatura").eq("docente_id", docente_id).execute()
+    return [r["asignatura"] for r in (resp.data or [])]
+
+
+def _asignar_curso_docente(docente_id: str, asignatura: str):
+    supabase = get_supabase_admin()
+    supabase.table("docente_cursos").insert({
+        "docente_id": docente_id,
+        "asignatura": asignatura,
+    }).execute()
+
+
+def _quitar_curso_docente(docente_id: str, asignatura: str):
+    supabase = get_supabase_admin()
+    supabase.table("docente_cursos").delete().eq("docente_id", docente_id).eq("asignatura", asignatura).execute()
 
 
 # ============================================================

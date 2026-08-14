@@ -116,6 +116,15 @@ INSERT INTO config_sistema (clave, valor, descripcion) VALUES
     ('costo_maximo_sesion_usd', '0.10', 'Costo máximo estimado por sesión en USD')
 ON CONFLICT (clave) DO NOTHING;
 
+-- 8b. DOCENTE_CURSOS — autorización docente → cursos (qué cursos puede administrar cada docente)
+CREATE TABLE IF NOT EXISTS docente_cursos (
+    id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+    docente_id UUID NOT NULL REFERENCES profiles(id) ON DELETE CASCADE,
+    asignatura TEXT NOT NULL,
+    created_at TIMESTAMPTZ DEFAULT NOW(),
+    UNIQUE(docente_id, asignatura)
+);
+
 -- 9. ROW LEVEL SECURITY — cada rol ve solo lo que le corresponde
 ALTER TABLE profiles ENABLE ROW LEVEL SECURITY;
 ALTER TABLE grupos ENABLE ROW LEVEL SECURITY;
@@ -124,6 +133,7 @@ ALTER TABLE conversaciones ENABLE ROW LEVEL SECURITY;
 ALTER TABLE mensajes ENABLE ROW LEVEL SECURITY;
 ALTER TABLE mensajes_docente ENABLE ROW LEVEL SECURITY;
 ALTER TABLE logs_sesiones ENABLE ROW LEVEL SECURITY;
+ALTER TABLE docente_cursos ENABLE ROW LEVEL SECURITY;
 
 -- Políticas: profiles
 CREATE POLICY "Usuarios ven su propio perfil" ON profiles
@@ -189,6 +199,22 @@ CREATE POLICY "Estudiante ve sus grupos" ON grupos
     FOR SELECT USING (EXISTS (
         SELECT 1 FROM grupos_estudiantes ge
         WHERE ge.grupo_id = grupos.id AND ge.estudiante_id = auth.uid()
+    ));
+
+-- Políticas: docente_cursos (autorización docente → cursos)
+CREATE POLICY "Docente ve sus cursos" ON docente_cursos
+    FOR SELECT USING (docente_id = auth.uid());
+CREATE POLICY "Admin ve cursos" ON docente_cursos
+    FOR SELECT USING (EXISTS (
+        SELECT 1 FROM profiles WHERE id = auth.uid() AND rol = 'admin'
+    ));
+CREATE POLICY "Admin inserta cursos" ON docente_cursos
+    FOR INSERT WITH CHECK (EXISTS (
+        SELECT 1 FROM profiles WHERE id = auth.uid() AND rol = 'admin'
+    ));
+CREATE POLICY "Admin borra cursos" ON docente_cursos
+    FOR DELETE USING (EXISTS (
+        SELECT 1 FROM profiles WHERE id = auth.uid() AND rol = 'admin'
     ));
 
 -- Políticas: logs (solo admin)
@@ -320,6 +346,8 @@ CREATE INDEX IF NOT EXISTS idx_profiles_rol ON profiles(rol);
 CREATE INDEX IF NOT EXISTS idx_profiles_creado_por ON profiles(creado_por);
 CREATE INDEX IF NOT EXISTS idx_profiles_asignatura ON profiles(asignatura);
 CREATE INDEX IF NOT EXISTS idx_grupos_creador ON grupos(creado_por);
+CREATE INDEX IF NOT EXISTS idx_docente_cursos_docente ON docente_cursos(docente_id);
+CREATE INDEX IF NOT EXISTS idx_docente_cursos_asignatura ON docente_cursos(asignatura);
 CREATE INDEX IF NOT EXISTS idx_grupos_estudiantes_grupo ON grupos_estudiantes(grupo_id);
 CREATE INDEX IF NOT EXISTS idx_grupos_estudiantes_estudiante ON grupos_estudiantes(estudiante_id);
 CREATE INDEX IF NOT EXISTS idx_conversaciones_estudiante ON conversaciones(estudiante_id);
