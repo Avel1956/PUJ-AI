@@ -71,6 +71,14 @@ def _asignatura_activa(key_prefix: str = "gestion") -> str:
     return opciones[sel]
 
 
+def _asignatura_unica() -> str:
+    """Retorna la asignatura si el deploy tiene exactamente una; si no, ''. Sin UI."""
+    asignaturas = GestorAsignaturas.listar()
+    if len(asignaturas) == 1:
+        return asignaturas[0]
+    return ""
+
+
 # ============================================================
 # Tab: Gestión de Estudiantes
 # ============================================================
@@ -390,10 +398,12 @@ def _tab_tracking(usuario):
     st.subheader("📊 Seguimiento de Estudiantes")
     supabase = get_supabase()
 
+    asignatura_deploy = _asignatura_unica()
+
     # Filtros
     col1, col2 = st.columns(2)
     with col1:
-        mis_estudiantes = _estudiantes_del_docente(usuario.id, supabase)
+        mis_estudiantes = _estudiantes_del_docente(usuario.id, supabase, asignatura_deploy)
         mapa_est = {e["nombre"]: e["id"] for e in mis_estudiantes}
         if not mapa_est:
             st.info("👥 Aún no tienes grupos con estudiantes. Crea un grupo en la pestaña **👥 Grupos** para hacer seguimiento.")
@@ -415,15 +425,19 @@ def _tab_tracking(usuario):
             key="tracking_estudiante",
         )
     with col2:
-        asignaturas_resp = supabase.table("conversaciones").select("asignatura").execute()
-        asigs = sorted(set(
-            c["asignatura"] for c in (asignaturas_resp.data or []) if c["asignatura"]
-        ))
-        asignatura_sel = st.selectbox(
-            "Filtrar por asignatura",
-            options=["(Todas)"] + asigs,
-            key="tracking_asignatura",
-        )
+        if asignatura_deploy:
+            st.caption(f"📖 Curso: **{GestorAsignaturas.nombre_legible(asignatura_deploy)}**")
+            asignatura_sel = asignatura_deploy
+        else:
+            asignaturas_resp = supabase.table("conversaciones").select("asignatura").execute()
+            asigs = sorted(set(
+                c["asignatura"] for c in (asignaturas_resp.data or []) if c["asignatura"]
+            ))
+            asignatura_sel = st.selectbox(
+                "Filtrar por asignatura",
+                options=["(Todas)"] + asigs,
+                key="tracking_asignatura",
+            )
 
     # Construir query
     query = supabase.table("conversaciones").select("*")
@@ -616,19 +630,17 @@ def _tab_descargas(usuario):
     st.caption("Formato JSONL: una línea por mensaje. Incluye metadatos (estudiante, asignatura, tokens, costo). Ideal para análisis con otros agentes IA.")
 
     supabase = get_supabase()
+    asignatura_deploy = _asignatura_unica()
 
-    # --- Estudiantes disponibles (solo los del docente) ---
-    mis_estudiantes = _estudiantes_del_docente(usuario.id, supabase)
+    # --- Estudiantes disponibles (solo los del docente y curso actual) ---
+    mis_estudiantes = _estudiantes_del_docente(usuario.id, supabase, asignatura_deploy)
     mapa_est = {e["nombre"]: e for e in mis_estudiantes}
 
     # --- Grupos del docente ---
-    grupos = (
-        supabase.table("grupos")
-        .select("id, nombre, asignatura")
-        .eq("creado_por", usuario.id)
-        .order("nombre")
-        .execute()
-    )
+    grupos_q = supabase.table("grupos").select("id, nombre, asignatura").eq("creado_por", usuario.id)
+    if asignatura_deploy:
+        grupos_q = grupos_q.eq("asignatura", asignatura_deploy)
+    grupos = grupos_q.order("nombre").execute()
     mapa_grp = {g["nombre"]: g for g in (grupos.data or [])}
 
     col1, col2, col3 = st.columns(3)
@@ -651,17 +663,20 @@ def _tab_descargas(usuario):
 
     with col3:
         st.markdown("**Todo**")
-        n_total = _contar_conversaciones_docente(usuario.id)
+        n_total = _contar_conversaciones_docente(usuario.id, asignatura_deploy)
         st.metric("Conversaciones totales", n_total)
         if st.button("📥 Descargar TODO (JSONL)", key="btn_dl_todo", use_container_width=True, type="primary"):
-            jsonl = _generar_jsonl_docente(usuario.id)
+            jsonl = _generar_jsonl_docente(usuario.id, asignatura_deploy)
             _ofrecer_descarga(jsonl, "todas_conversaciones.jsonl")
 
     # --- Asignaturas de los grupos del docente ---
     st.divider()
     st.markdown("**Por asignatura**")
-    grupos = supabase.table("grupos").select("asignatura").eq("creado_por", usuario.id).execute()
-    asigs = sorted(set(g["asignatura"] for g in (grupos.data or []) if g["asignatura"]))
+    grupos_asig_q = supabase.table("grupos").select("asignatura").eq("creado_por", usuario.id)
+    if asignatura_deploy:
+        grupos_asig_q = grupos_asig_q.eq("asignatura", asignatura_deploy)
+    grupos_asig = grupos_asig_q.execute()
+    asigs = sorted(set(g["asignatura"] for g in (grupos_asig.data or []) if g["asignatura"]))
 
     if asigs:
         col_asig, _ = st.columns([2, 4])
@@ -768,9 +783,15 @@ def _tab_descargas(usuario):
 # ============================================================
 # Helpers de descarga JSONL
 # ============================================================
-def _estudiantes_del_docente(docente_id: str, supabase) -> list[dict]:
-    """Retorna lista de estudiantes que pertenecen a grupos creados por el docente."""
-    grupos = supabase.table("grupos").select("id").eq("creado_por", docente_id).execute()
+def _estudiantes_del_docente(docente_id: str, supabase, asignatura: str = "") -> list[dict]:
+    """Retorna lista de estudiantes que pertenecen a grupos creados por el docente.
+
+    Si se pasa `asignatura`, solo se consideran grupos de ese curso.
+    """
+    query = supabase.table("grupos").select("id").eq("creado_por", docente_id)
+    if asignatura:
+        query = query.eq("asignatura", asignatura)
+    grupos = query.execute()
     grupo_ids = [g["id"] for g in (grupos.data or [])]
     if not grupo_ids:
         return []
@@ -877,10 +898,10 @@ def _generar_jsonl_grupo(grupo_id: str, nombre_grupo: str) -> str:
     return "\n".join(lineas)
 
 
-def _generar_jsonl_docente(docente_id: str) -> str:
+def _generar_jsonl_docente(docente_id: str, asignatura: str = "") -> str:
     """Genera JSONL con todas las conversaciones de los estudiantes del docente."""
     supabase = get_supabase()
-    estudiantes = _estudiantes_del_docente(docente_id, supabase)
+    estudiantes = _estudiantes_del_docente(docente_id, supabase, asignatura)
     lineas = [_linea_metadata(extra={"docente_id": docente_id})]
     for est in estudiantes:
         convs = (
@@ -987,9 +1008,9 @@ def _generar_jsonl_conversacion(conv: dict, nombre_est: str, mensajes: list) -> 
     return "\n".join(lineas)
 
 
-def _contar_conversaciones_docente(docente_id: str) -> int:
+def _contar_conversaciones_docente(docente_id: str, asignatura: str = "") -> int:
     supabase = get_supabase()
-    estudiantes = _estudiantes_del_docente(docente_id, supabase)
+    estudiantes = _estudiantes_del_docente(docente_id, supabase, asignatura)
     if not estudiantes:
         return 0
     est_ids = [e["id"] for e in estudiantes]
