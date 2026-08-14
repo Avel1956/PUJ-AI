@@ -11,8 +11,9 @@ st.set_page_config(
 
 from auth import (
     hay_sesion, es_estudiante, es_docente, es_admin,
-    login, signup, logout, usuario_actual,
+    login, signup, logout, usuario_actual, get_supabase,
 )
+from rag_engine import GestorAsignaturas
 from pages_estudiante import render_dashboard_estudiante
 from pages_docente import render_dashboard_docente
 from pages_admin import render_dashboard_admin
@@ -35,7 +36,16 @@ st.markdown("""
 def main():
     if not hay_sesion():
         _render_login_page()
-    elif es_estudiante():
+        return
+
+    usuario = usuario_actual()
+    ok, msg = _verificar_acceso_curso(usuario)
+    if not ok:
+        _render_sidebar_logout()
+        st.error(msg)
+        return
+
+    if es_estudiante():
         _render_sidebar_logout()
         render_dashboard_estudiante()
     elif es_docente():
@@ -47,6 +57,63 @@ def main():
     else:
         st.error("Rol no reconocido. Contacte al administrador.")
         logout()
+
+
+# ============================================================
+# Control de acceso por curso (deploy de una sola asignatura)
+# ============================================================
+def _verificar_acceso_curso(usuario) -> tuple[bool, str]:
+    """Verifica que el usuario pueda acceder al curso de este deploy.
+
+    - Admin: acceso total.
+    - Docente: debe tener el curso asignado en docente_cursos.
+    - Estudiante: su perfil debe tener asignatura == curso del deploy.
+
+    En deploys multi-curso (p.ej. la rama main) no se restringe aquí.
+    """
+    if usuario.es_admin:
+        return True, ""
+
+    asignaturas = GestorAsignaturas.listar()
+    if len(asignaturas) != 1:
+        # Multi-curso: la restricción se maneja en la UI de cada pestaña
+        return True, ""
+
+    curso = asignaturas[0]
+    nombre_curso = GestorAsignaturas.nombre_legible(curso)
+    supabase = get_supabase()
+
+    if usuario.es_docente:
+        resp = (
+            supabase.table("docente_cursos")
+            .select("id")
+            .eq("docente_id", usuario.id)
+            .eq("asignatura", curso)
+            .execute()
+        )
+        if resp.data:
+            return True, ""
+        return False, (
+            f"🚫 No está autorizado para el curso **{nombre_curso}**. "
+            f"Si considera que es un error, contacte al administrador."
+        )
+
+    if usuario.es_estudiante:
+        resp = (
+            supabase.table("profiles")
+            .select("id")
+            .eq("id", usuario.id)
+            .eq("asignatura", curso)
+            .execute()
+        )
+        if resp.data:
+            return True, ""
+        return False, (
+            f"🚫 No está inscrito en el curso **{nombre_curso}**. "
+            f"Si considera que es un error, contacte a su profesor."
+        )
+
+    return True, ""
 
 
 # ============================================================
