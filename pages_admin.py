@@ -111,40 +111,108 @@ def _tab_estudiantes():
     st.subheader("👥 Gestión de Estudiantes")
     supabase = get_supabase()
 
+    # Mapa docente_id -> nombre
+    docentes = supabase.table("profiles").select("id, nombre").eq("rol", "docente").order("nombre").execute()
+    mapa_docentes = {d["id"]: d["nombre"] for d in (docentes.data or [])}
+
     resp = (
         supabase.table("profiles")
-        .select("id, email, nombre, created_at")
+        .select("id, email, nombre, creado_por, asignatura, created_at")
         .eq("rol", "estudiante")
         .order("nombre")
         .execute()
     )
+    estudiantes = resp.data or []
 
-    if not resp.data:
+    if not estudiantes:
         st.info("No hay estudiantes registrados.")
         return
 
-    st.caption(f"{len(resp.data)} estudiantes encontrados")
+    st.caption(f"{len(estudiantes)} estudiantes encontrados")
 
-    for p in resp.data:
-        # Contar conversaciones
-        convs = (
-            supabase.table("conversaciones")
-            .select("id", count="exact")
-            .eq("estudiante_id", p["id"])
-            .execute()
+    huerfanos = [p for p in estudiantes if not p.get("creado_por") or not p.get("asignatura")]
+    asignados = [p for p in estudiantes if p.get("creado_por") and p.get("asignatura")]
+
+    # --- Estudiantes sin asignar ---
+    if huerfanos:
+        st.subheader(f"🔧 Sin asignar ({len(huerfanos)})")
+        st.caption("Estudiantes sin curso/docente. Reasígnelos a continuación.")
+        _render_reasignacion(huerfanos, mapa_docentes)
+
+    # --- Agrupados por curso → docente ---
+    st.subheader("📚 Por curso")
+    if not asignados:
+        st.info("No hay estudiantes asignados a un curso todavía.")
+        return
+
+    por_curso = {}
+    for p in asignados:
+        por_curso.setdefault(p["asignatura"], []).append(p)
+
+    for asignatura in sorted(por_curso.keys()):
+        grupo = por_curso[asignatura]
+        with st.expander(f"📖 {GestorAsignaturas.nombre_legible(asignatura)} (`{asignatura}`) — {len(grupo)} estudiantes"):
+            por_docente = {}
+            for p in grupo:
+                por_docente.setdefault(p["creado_por"], []).append(p)
+            for doc_id in sorted(por_docente.keys()):
+                lista = por_docente[doc_id]
+                doc_nombre = mapa_docentes.get(doc_id, "Docente desconocido")
+                st.markdown(f"**👨‍🏫 {doc_nombre}** — {len(lista)} estudiantes")
+                for p in lista:
+                    _render_estudiante_admin(p)
+
+
+def _render_estudiante_admin(p):
+    supabase = get_supabase()
+    convs = supabase.table("conversaciones").select("id", count="exact").eq("estudiante_id", p["id"]).execute()
+    n_convs = convs.count if hasattr(convs, "count") else 0
+    with st.expander(f"🧑 {p['nombre']} — {p['email']} — {n_convs} conv."):
+        st.caption(f"Registrado: {p.get('created_at', '?')}")
+        if st.button("🗑️ Eliminar estudiante", key=f"del_est_{p['id']}", type="secondary"):
+            st.session_state[f"cf_adm_est_{p['id']}"] = True
+            st.rerun()
+        _confirmar_y_borrar(
+            f"cf_adm_est_{p['id']}",
+            f"¿Eliminar a {p['nombre']} y todas sus conversaciones?",
+            lambda pid=p["id"]: _borrar_perfil(pid, "estudiante"),
         )
-        n_convs = convs.count if hasattr(convs, "count") else 0
 
-        with st.expander(f"🧑 {p['nombre']} — {p['email']} — {n_convs} conversaciones"):
-            st.caption(f"Registrado: {p.get('created_at', '?')}")
-            if st.button("🗑️ Eliminar estudiante", key=f"del_est_{p['id']}", type="secondary"):
-                st.session_state[f"cf_adm_est_{p['id']}"] = True
-                st.rerun()
-            _confirmar_y_borrar(
-                f"cf_adm_est_{p['id']}",
-                f"¿Eliminar a {p['nombre']} y todas sus conversaciones?",
-                lambda pid=p["id"]: _borrar_perfil(pid, "estudiante"),
-            )
+
+def _render_reasignacion(huerfanos, mapa_docentes):
+    supabase = get_supabase()
+    nombres_doc = list(mapa_docentes.values())
+    asigs = set(GestorAsignaturas.listar())
+    for p in huerfanos:
+        if p.get("asignatura"):
+            asigs.add(p["asignatura"])
+    asigs.discard("")
+    asigs_ordenadas = sorted(asigs)
+
+    for p in huerfanos:
+        with st.expander(f"🧑 {p['nombre']} — {p['email']}"):
+            col1, col2, col3 = st.columns([2, 2, 1])
+            with col1:
+                doc_sel = st.selectbox("Docente", ["(Seleccionar)"] + nombres_doc, key=f"rea_doc_{p['id']}")
+            with col2:
+                asig_sel = st.selectbox("Curso", asigs_ordenadas, key=f"rea_asig_{p['id']}")
+            with col3:
+                st.write("")
+                st.write("")
+                if doc_sel != "(Seleccionar)" and st.button("Asignar", key=f"rea_btn_{p['id']}"):
+                    doc_id = next((k for k, v in mapa_docentes.items() if v == doc_sel), None)
+                    if doc_id:
+                        _reasignar_estudiante(p["id"], doc_id, asig_sel)
+                        st.success("Reasignado correctamente.")
+                        st.rerun()
+
+
+def _reasignar_estudiante(estudiante_id: str, docente_id: str, asignatura: str):
+    supabase = get_supabase_admin()
+    supabase.table("profiles").update({
+        "creado_por": docente_id,
+        "asignatura": asignatura,
+    }).eq("id", estudiante_id).execute()
 
 
 # ============================================================
