@@ -37,16 +37,25 @@ def _render_dashboard_estudiante():
     with st.sidebar:
         _sidebar_estudiante(usuario)
 
-    # Pestañas: Chat | Historial | Bandeja del docente
-    tab1, tab2, tab3 = st.tabs(["💬 Chat", "📚 Historial", "📬 Bandeja"])
+    # Pestañas: Chat | Historial | Bandeja
+    # Se usa un radio horizontal (en lugar de st.tabs) para poder saltar
+    # programáticamente a la pestaña Chat al reanudar una conversación.
+    opciones_tabs = ["💬 Chat", "📚 Historial", "📬 Bandeja"]
+    if "tab_estudiante_activa" not in st.session_state:
+        st.session_state.tab_estudiante_activa = "💬 Chat"
+    tab_activa = st.radio(
+        "",
+        opciones_tabs,
+        horizontal=True,
+        key="tab_estudiante_activa",
+        label_visibility="collapsed",
+    )
 
-    with tab1:
+    if tab_activa == "💬 Chat":
         _tab_chat(usuario)
-
-    with tab2:
+    elif tab_activa == "📚 Historial":
         _tab_historial(usuario)
-
-    with tab3:
+    else:
         _tab_bandeja(usuario)
 
 
@@ -156,6 +165,14 @@ fines exclusivamente pedagógicos:
     if "conversacion_activa" not in st.session_state:
         st.session_state.conversacion_activa = crear_conversacion(usuario, asignatura)
 
+    # Botón para empezar una conversación nueva
+    if st.button("➕ Nueva conversación", key="btn_nueva_conv_estudiante"):
+        st.session_state.messages = []
+        st.session_state.total_tokens = 0
+        st.session_state.costo_total = 0.0
+        st.session_state.conversacion_activa = crear_conversacion(usuario, asignatura)
+        st.rerun()
+
     # Inicializar MotorRAG
     motor = inicializar_motor_rag(asignatura)
 
@@ -215,6 +232,9 @@ def _tab_historial(usuario):
         fecha = conv["created_at"][:19].replace("T", " ") if conv["created_at"] else ""
         estado = "🟢" if conv["activa"] else "⚫"
         with st.expander(f"{estado} {conv['titulo']} — {fecha} ({conv['asignatura']})"):
+            if st.button("💬 Reanudar esta conversación", key=f"reanudar_{conv['id']}", type="primary"):
+                _reanudar_conversacion(conv["id"], conv.get("asignatura", ""))
+                st.rerun()
             mensajes_resp = (
                 supabase.table("mensajes")
                 .select("rol,contenido,created_at")
@@ -280,6 +300,34 @@ def _tab_bandeja(usuario):
 # ============================================================
 # Helpers
 # ============================================================
+def _reanudar_conversacion(conv_id: str, asignatura: str):
+    """Carga una conversación previa en el chat y salta a la pestaña Chat."""
+    supabase = get_supabase()
+    msgs_resp = (
+        supabase.table("mensajes")
+        .select("rol, contenido")
+        .eq("conversacion_id", conv_id)
+        .order("created_at")
+        .execute()
+    )
+    st.session_state.messages = [
+        {"role": m["rol"], "content": m["contenido"]}
+        for m in (msgs_resp.data or [])
+    ]
+    st.session_state.conversacion_activa = conv_id
+
+    # Sincronizar la asignatura del panel lateral (solo si el curso está disponible)
+    if asignatura:
+        opciones = {GestorAsignaturas.nombre_legible(a): a for a in GestorAsignaturas.listar()}
+        for label, slug in opciones.items():
+            if slug == asignatura:
+                st.session_state.sel_asignatura_estudiante = label
+                st.session_state.asignatura_actual = asignatura
+                break
+
+    st.session_state.tab_estudiante_activa = "💬 Chat"
+
+
 def _grupos_del_estudiante(estudiante_id: str, asignatura: str) -> list[dict]:
     try:
         supabase = get_supabase()
