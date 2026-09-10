@@ -359,7 +359,14 @@ def _tab_modelos():
 
     # Modelo actual
     modelo_actual = _get_modelo_actual_db()
-    st.info(f"🔧 Modelo activo: **{modelo_actual}**")
+    if modelo_actual in MODELOS_DISPONIBLES:
+        st.info(f"🔧 Modelo activo: **{modelo_actual}**")
+    else:
+        st.error(
+            f"🔧 Modelo activo: **{modelo_actual}** — ya no existe en "
+            f"`MODELOS_DISPONIBLES`. Los cursos están usando "
+            f"`{MODELO_POR_DEFECTO}` de forma provisional. Seleccione uno abajo."
+        )
 
     opciones = {
         f"{v['descripcion']} ({k})": k
@@ -384,26 +391,58 @@ def _tab_modelos():
     with col1:
         if st.button("🔄 Cambiar modelo", type="primary"):
             try:
-                supabase.table("config_sistema").update({
-                    "valor": nuevo_modelo,
-                }).eq("clave", "modelo_llm").execute()
-                st.success(f"Modelo cambiado a **{nuevo_modelo}**.")
+                resp = (
+                    supabase.table("config_sistema")
+                    .upsert(
+                        {
+                            "clave": "modelo_llm",
+                            "valor": nuevo_modelo,
+                            "descripcion": "Modelo LLM por defecto (clave de MODELOS_DISPONIBLES)",
+                        },
+                        on_conflict="clave",
+                    )
+                    .execute()
+                )
+                guardado = (resp.data or [{}])[0].get("valor")
+                if guardado == nuevo_modelo:
+                    st.cache_data.clear()
+                    st.success(
+                        f"Modelo cambiado a **{nuevo_modelo}**. "
+                        "Aplica a TODOS los cursos de inmediato."
+                    )
+                    st.rerun()
+                else:
+                    st.error(
+                        "El cambio no se pudo confirmar: la base sigue "
+                        f"devolviendo `{guardado}`."
+                    )
             except Exception as e:
                 st.error(f"Error al cambiar modelo: {e}")
 
     with col2:
         if nuevo_modelo != modelo_actual:
-            st.warning("⚠️ El cambio afectará a **todos** los estudiantes.")
+            st.warning(
+                "⚠️ El cambio afecta a **todos los cursos a la vez**: la "
+                "configuración es global, no por curso."
+            )
 
     # Tabla de costos
     st.subheader("💰 Tarifas de referencia (USD por 1K tokens)")
+    st.caption(
+        "DeepSeek cobra el doble en horas peak: 01:00-04:00 y 06:00-10:00 UTC, "
+        "lunes a viernes. En hora Colombia eso es 20:00-23:00 y 01:00-05:00, "
+        "así que las clases diurnas siempre caen en off-peak."
+    )
     costos = []
     for clave, info in MODELOS_DISPONIBLES.items():
+        tiene_offpeak = "input_cost_offpeak" in info
         costos.append({
             "Modelo": clave,
             "Proveedor": info["provider"],
-            "Input $/1K": f"${info['input_cost']:.5f}",
-            "Output $/1K": f"${info['output_cost']:.5f}",
+            "Off-peak in $/1K": f"${info['input_cost_offpeak']:.5f}" if tiene_offpeak else f"${info['input_cost']:.5f}",
+            "Off-peak out $/1K": f"${info['output_cost_offpeak']:.5f}" if tiene_offpeak else f"${info['output_cost']:.5f}",
+            "Peak in $/1K": f"${info['input_cost']:.5f}",
+            "Peak out $/1K": f"${info['output_cost']:.5f}",
         })
     st.dataframe(costos, hide_index=True, use_container_width=True)
 
