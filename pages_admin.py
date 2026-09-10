@@ -3,7 +3,10 @@ import streamlit as st
 import datetime
 import json
 import uuid
-from auth import usuario_actual, get_supabase, get_supabase_admin, crear_usuario_docente
+from auth import (
+    usuario_actual, get_supabase, get_supabase_admin, crear_usuario_docente,
+    restablecer_password,
+)
 from config import MODELOS_DISPONIBLES, MODELO_POR_DEFECTO
 from rag_engine import GestorAsignaturas
 from chat_core import (
@@ -143,6 +146,8 @@ def _tab_docentes():
                         st.rerun()
 
             st.divider()
+            _reset_cuenta_admin(p, "docente")
+            st.divider()
             if st.button("🗑️ Eliminar docente", key=f"del_doc_{p['id']}", type="secondary"):
                 st.session_state[f"cf_adm_doc_{p['id']}"] = True
                 st.rerun()
@@ -245,12 +250,60 @@ def _tab_estudiantes():
                     _render_estudiante_admin(p)
 
 
+def _reset_cuenta_admin(perfil: dict, rol: str):
+    """Restablece la contraseña de cualquier cuenta (acción exclusiva de admin).
+
+    El admin no lleva `docente_id`, así que puede restablecer cuentas de
+    cualquier rol y de cualquier dueño. La clave nueva se muestra una sola vez.
+    """
+    clave_ss = f"_clave_nueva_{perfil['id']}"
+    confirm_key = f"cf_rst_adm_{perfil['id']}"
+
+    if st.button("🔑 Restablecer contraseña", key=f"rst_adm_{perfil['id']}"):
+        st.session_state[confirm_key] = True
+        st.rerun()
+
+    state = st.session_state.get(confirm_key)
+    if state is True:
+        st.warning(
+            f"¿Generar una contraseña nueva para **{perfil['nombre']}** ({rol})? "
+            "La contraseña anterior dejará de funcionar."
+        )
+        c1, c2 = st.columns(2)
+        with c1:
+            if st.button("⚠️ Sí, restablecer", key=f"{confirm_key}_yes"):
+                st.session_state[confirm_key] = "execute"
+                st.rerun()
+        with c2:
+            if st.button("Cancelar", key=f"{confirm_key}_no"):
+                del st.session_state[confirm_key]
+                st.rerun()
+    elif state == "execute":
+        del st.session_state[confirm_key]
+        ok, res = restablecer_password(perfil["id"], "")
+        if ok:
+            st.session_state[clave_ss] = res
+        else:
+            st.error(f"No se pudo restablecer: {res}")
+        st.rerun()
+
+    nueva = st.session_state.get(clave_ss)
+    if nueva:
+        st.success(f"Contraseña nueva de **{perfil['nombre']}** ({perfil['email']}): `{nueva}`")
+        st.caption("Cópiela ahora: no se almacena y no podrá volver a consultarse.")
+        if st.button("✔️ Ocultar", key=f"ocultar_clave_{perfil['id']}"):
+            st.session_state.pop(clave_ss, None)
+            st.rerun()
+
+
 def _render_estudiante_admin(p):
     supabase = get_supabase()
     convs = supabase.table("conversaciones").select("id", count="exact").eq("estudiante_id", p["id"]).execute()
     n_convs = convs.count if hasattr(convs, "count") else 0
     with st.expander(f"🧑 {p['nombre']} — {p['email']} — {n_convs} conv."):
         st.caption(f"Registrado: {p.get('created_at', '?')}")
+        _reset_cuenta_admin(p, "estudiante")
+        st.divider()
         if st.button("🗑️ Eliminar estudiante", key=f"del_est_{p['id']}", type="secondary"):
             st.session_state[f"cf_adm_est_{p['id']}"] = True
             st.rerun()

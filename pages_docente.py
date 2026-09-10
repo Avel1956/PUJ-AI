@@ -5,10 +5,11 @@ import json
 import uuid
 import io
 import csv
-import random
-import string
 import pandas as pd
-from auth import usuario_actual, get_supabase, get_supabase_admin, crear_usuario_estudiante, _email_con_alias
+from auth import (
+    usuario_actual, get_supabase, get_supabase_admin, crear_usuario_estudiante,
+    _email_con_alias, restablecer_password, generar_password,
+)
 from rag_engine import GestorAsignaturas
 from chat_core import (
     get_modelo_activo,
@@ -266,7 +267,7 @@ def _tab_estudiantes(usuario):
 
         with st.expander(f"🧑 {p['nombre']} — {p['email']} — {n_convs} conversaciones{grupos_txt}"):
             st.caption(f"Registrado: {p.get('created_at', '?')}")
-            col1, col2, col3 = st.columns(3)
+            col1, col2, col3, col4 = st.columns(4)
             with col1:
                 if st.button("📊 Ver conversaciones", key=f"ver_conv_est_{p['id']}"):
                     st.session_state._ver_convs_est = p["id"]
@@ -277,6 +278,16 @@ def _tab_estudiantes(usuario):
                     jsonl = _generar_jsonl_estudiante(p["id"], p["nombre"], usuario.id)
                     _ofrecer_descarga(jsonl, f"conversaciones_{p['nombre'].replace(' ', '_')}.jsonl")
             with col3:
+                if st.button("🔑 Restablecer contraseña", key=f"rp_est_{p['id']}"):
+                    st.session_state[f"cf_rst_est_{p['id']}"] = True
+                    st.rerun()
+                _confirmar_reset(
+                    f"cf_rst_est_{p['id']}",
+                    [{**p, "grupos": grupos_de_p}],
+                    usuario,
+                    "restablecer",
+                )
+            with col4:
                 if st.button("🗑️ Eliminar", key=f"del_est_{p['id']}", type="secondary"):
                     st.session_state[f"cf_doc_est_{p['id']}"] = True
                     st.rerun()
@@ -285,6 +296,27 @@ def _tab_estudiantes(usuario):
                     f"¿Eliminar a {p['nombre']} y todas sus conversaciones?",
                     lambda pid=p["id"]: _borrar_estudiante(pid, usuario.id),
                 )
+
+    # --- Restablecer contraseñas en bloque (respeta el filtro por grupo) ---
+    st.divider()
+    st.subheader("🔑 Restablecer contraseñas")
+    st.caption(
+        "Las contraseñas se guardan cifradas y **no son recuperables**. Si un "
+        "estudiante las perdió, la única salida es asignarle una nueva. Esta "
+        "acción afecta a los **{}** estudiantes listados arriba (respeta el "
+        "filtro por grupo).".format(len(visibles))
+    )
+
+    if st.button(
+        f"🔑 Restablecer las {len(visibles)} contraseñas mostradas",
+        key="btn_reset_visibles",
+    ):
+        st.session_state["cf_reset_visibles"] = True
+        st.rerun()
+    _confirmar_reset("cf_reset_visibles", visibles, usuario, "restablecer todas")
+
+    # Credenciales recién generadas (si las hay)
+    _mostrar_credenciales()
 
     # --- Conversaciones de un estudiante (vista en línea desde la lista) ---
     ver_est_id = st.session_state.get("_ver_convs_est")
@@ -869,7 +901,8 @@ def _tab_descargas(usuario):
         # Si hay credenciales de la última carga masiva, usarlas
         if st.session_state.get("_ultimas_credenciales"):
             fecha = st.session_state.get("_ultima_fecha_credenciales", "?")
-            st.info(f"📋 Credenciales de la carga masiva del {fecha}")
+            origen = st.session_state.get("_ultimas_credenciales_origen", "Carga masiva")
+            st.info(f"📋 {origen} del {fecha} — {len(st.session_state._ultimas_credenciales)} credenciales")
             csv_buf = io.StringIO()
             writer = csv.writer(csv_buf)
             writer.writerow(["nombre", "email", "password", "grupo"])
@@ -1379,8 +1412,132 @@ def _nombre_destino(msg, supabase) -> str:
 
 def _generar_password(length: int = 10) -> str:
     """Genera una contraseña aleatoria alfanumérica fácil de leer (sin confusos)."""
-    chars = ''.join(c for c in string.ascii_letters + string.digits if c not in '0O1Il')
-    return ''.join(random.choice(chars) for _ in range(length))
+    return generar_password(length)
+
+
+def _reset_credenciales(estudiantes: list[dict], usuario) -> None:
+    """Asigna una contraseña nueva a cada estudiante y guarda el resultado.
+
+    El resultado queda en `st.session_state._ultimas_credenciales` para que
+    sea descargable desde esta pestaña y desde Descargas. Es la ÚNICA vez que
+    la contraseña en claro existe: no se almacena en la base de datos.
+    """
+    resultados, credenciales = [], []
+    total = len(estudiantes)
+    bar = st.progress(0.0, text="Restableciendo contraseñas...")
+
+    for i, est in enumerate(estudiantes):
+        ok, msg = restablecer_password(est["id"], "", usuario.id)
+        fila = {
+            "nombre": est.get("nombre", "?"),
+            "email": est.get("email", ""),
+            "password": msg if ok else "",
+            "grupo": ", ".join(est.get("grupos", [])),
+            "ok": ok,
+            "msg": "" if ok else msg,
+        }
+        resultados.append(fila)
+        if ok:
+            credenciales.append(fila)
+        bar.progress((i + 1) / total, text=f"{i + 1}/{total}: {fila['nombre']}")
+
+    bar.empty()
+
+    fallidos = [r for r in resultados if not r["ok"]]
+    if credenciales:
+        st.session_state._ultimas_credenciales = credenciales
+        st.session_state._ultima_fecha_credenciales = datetime.date.today().isoformat()
+        st.session_state._ultimas_credenciales_origen = "Restablecimiento"
+    if fallidos:
+        st.warning(f"⚠️ No se pudieron restablecer {len(fallidos)} contraseñas.")
+        with st.expander("Ver errores"):
+            for r in fallidos:
+                st.caption(f"**{r['nombre']}** ({r['email']}): {r['msg']}")
+
+
+def _confirmar_reset(confirm_key: str, estudiantes: list[dict], usuario, etiqueta: str) -> None:
+    """Confirmación en 2 pasos antes de restablecer contraseñas.
+
+    LLAMAR INCONDICIONALMENTE, no dentro de `if st.button`.
+    """
+    state = st.session_state.get(confirm_key, None)
+    if state is None:
+        return
+
+    if state is True:
+        if len(estudiantes) == 1:
+            aviso = (
+                f"¿Generar una contraseña nueva para **{estudiantes[0].get('nombre', '?')}**? "
+                "La contraseña anterior dejará de funcionar."
+            )
+        else:
+            aviso = (
+                f"¿Generar contraseñas nuevas para **{len(estudiantes)}** estudiantes? "
+                "Las contraseñas anteriores dejarán de funcionar."
+            )
+        st.warning(aviso)
+        c1, c2 = st.columns(2)
+        with c1:
+            if st.button(f"⚠️ Sí, {etiqueta}", key=f"{confirm_key}_yes"):
+                st.session_state[confirm_key] = "execute"
+                st.rerun()
+        with c2:
+            if st.button("Cancelar", key=f"{confirm_key}_no"):
+                del st.session_state[confirm_key]
+                st.rerun()
+
+    elif state == "execute":
+        del st.session_state[confirm_key]
+        _reset_credenciales(estudiantes, usuario)
+        st.rerun()
+
+
+def _mostrar_credenciales(origen: str = "Restablecimiento") -> None:
+    """Muestra y ofrece descargar las credenciales recién generadas."""
+    credenciales = st.session_state.get("_ultimas_credenciales")
+    if not credenciales:
+        return
+
+    fecha = st.session_state.get("_ultima_fecha_credenciales", "?")
+    st.divider()
+    st.subheader(f"🔑 {origen} — credenciales generadas el {fecha}")
+    st.error(
+        "**Descárguelas ahora.** No se almacenan en la base de datos: si cierra "
+        "esta sesión sin descargarlas, las contraseñas se pierden otra vez y "
+        "habrá que volver a restablecerlas."
+    )
+
+    csv_buf = io.StringIO()
+    writer = csv.writer(csv_buf)
+    writer.writerow(["nombre", "email", "password", "grupo"])
+    for c in credenciales:
+        writer.writerow([c["nombre"], c["email"], c["password"], c["grupo"]])
+
+    col1, col2 = st.columns([1, 1])
+    with col1:
+        st.download_button(
+            label=f"📥 Descargar credenciales ({len(credenciales)})",
+            data=csv_buf.getvalue(),
+            file_name=f"credenciales_{fecha}.csv",
+            mime="text/csv",
+            type="primary",
+            key="dl_creds_reset",
+        )
+    with col2:
+        if st.button("✔️ Ya las descargué — ocultar", key="btn_ocultar_creds"):
+            st.session_state.pop("_ultimas_credenciales", None)
+            st.session_state.pop("_ultima_fecha_credenciales", None)
+            st.rerun()
+
+    with st.expander(f"Ver la tabla ({len(credenciales)} filas)"):
+        st.dataframe(
+            [
+                {"nombre": c["nombre"], "email": c["email"], "password": c["password"]}
+                for c in credenciales
+            ],
+            hide_index=True,
+            use_container_width=True,
+        )
 
 
 # ============================================================
