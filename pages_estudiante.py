@@ -1,14 +1,10 @@
 """pages_estudiante.py — Dashboard del estudiante: chat + historial + bandeja."""
 import streamlit as st
 import uuid
-import datetime
-from langchain_core.messages import HumanMessage, AIMessage, SystemMessage
 
 from auth import usuario_actual, get_supabase
-from config import MODELOS_DISPONIBLES, MODELO_POR_DEFECTO
-from prompts import construir_prompt_completo
-from rag_engine import MotorRAG, GestorAsignaturas
-from telemetry import ControlAbuso
+from rag_engine import GestorAsignaturas
+from telemetry import ControlAbuso, costo_maximo_sesion_usd
 from chat_core import (
     get_modelo_activo,
     inicializar_motor_rag,
@@ -100,10 +96,9 @@ def _sidebar_estudiante(usuario):
         st.session_state.grupo_actual = None
         st.caption("Sin grupo asignado")
 
-    # Control de abuso
-    ctrl = ControlAbuso(st.session_state.get("session_id", "anon"))
-    usadas = ctrl.contar()
-    st.caption(f"📊 Preguntas hoy: {usadas}/{ctrl.max_dia}")
+    # Control de uso (conteo real por estudiante, en la base)
+    ctrl = ControlAbuso(usuario.id)
+    st.caption(f"📊 Preguntas hoy: {ctrl.contar()}/{ctrl.max_dia}")
 
 
 # ============================================================
@@ -181,19 +176,36 @@ fines exclusivamente pedagógicos:
         with st.chat_message(msg["role"]):
             st.markdown(msg["content"])
 
+    # Guarda de costo por sesión (valor configurable por el admin en
+    # config_sistema.costo_maximo_sesion_usd, que antes no se leía nunca).
+    limite_costo = costo_maximo_sesion_usd()
+    costo_sesion = st.session_state.get("costo_total", 0.0)
+    if limite_costo > 0:
+        if costo_sesion >= limite_costo:
+            st.error(
+                f"⚠️ Esta sesión alcanzó el costo máximo configurado "
+                f"(${limite_costo:.2f} USD). Pulse **➕ Nueva conversación** "
+                "para continuar."
+            )
+            return
+        if costo_sesion >= limite_costo * 0.8:
+            st.warning(
+                f"⚠️ Esta sesión va por ${costo_sesion:.4f} de "
+                f"${limite_costo:.2f} USD permitidos."
+            )
+
     # Input del chat
-    control = ControlAbuso(st.session_state.session_id)
+    control = ControlAbuso(usuario.id)
     if not control.permitido():
-        st.warning("⚠️ Has alcanzado el límite de preguntas por hoy. Intenta de nuevo mañana.")
+        st.warning(
+            f"⚠️ Ha alcanzado el límite de {control.max_dia} preguntas por hoy. "
+            "Intente de nuevo mañana."
+        )
         return
 
     if prompt := st.chat_input("Escribe tu pregunta...", key="chat_input_estudiante"):
-        # Control de abuso (protegido)
-        try:
-            control.registrar()
-        except Exception:
-            pass
-
+        # El conteo lo alimenta telemetry.registrar_log al guardar el turno;
+        # no se lleva un contador aparte para no duplicar el cómputo.
         st.session_state.messages.append({"role": "user", "content": prompt})
         with st.chat_message("user"):
             st.markdown(prompt)
@@ -290,11 +302,28 @@ def _tab_bandeja(usuario):
         return
 
     for msg in resp.data:
-        no_leido = "🔵" if not msg["leido"] else "⚪"
+        no_leido = "🔵" if not msg.get("leido") else "⚪"
         with st.expander(f"{no_leido} {msg['asunto']} — {msg['created_at'][:19]}"):
             st.markdown(msg["contenido"])
             # NOTA: Los estudiantes no pueden borrar mensajes del docente.
             # El docente gestiona los mensajes desde su panel.
+
+    # Marcar como leídos los mensajes recién mostrados.
+    # `leido` no se actualizaba en ningún punto del código: el indicador de no
+    # leído quedaba para siempre y el docente nunca sabía si el estudiante
+    # había visto el mensaje. Se marca después de renderizar para que el
+    # estudiante sí alcance a ver el 🔵 la primera vez.
+    pendientes = [m["id"] for m in resp.data if not m.get("leido")]
+    if pendientes:
+        try:
+            (
+                supabase.table("mensajes_docente")
+                .update({"leido": True})
+                .in_("id", pendientes)
+                .execute()
+            )
+        except Exception:
+            pass
 
 
 # ============================================================
