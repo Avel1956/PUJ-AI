@@ -91,8 +91,7 @@ DEEPSEEK_THINKING = False
 # Máximo de tokens de salida por respuesta del tutor.
 MAX_TOKENS_RESPUESTA = 2048
 
-MAX_PREGUNTAS_POR_DIA = 50
-COSTO_MAXIMO_SESION = 0.10  # USD
+MAX_PREGUNTAS_POR_DIA = 50  # solo valor de respaldo: el vigente está en config_sistema
 
 
 # ============================================================
