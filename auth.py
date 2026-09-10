@@ -9,16 +9,67 @@ from config import SUPABASE_URL, SUPABASE_KEY, SUPABASE_SERVICE_KEY, PerfilUsuar
 
 
 # ============================================================
-# Cliente Supabase (cacheado)
+# Cliente Supabase
+#
+# POR QUÉ EL CLIENTE DE USUARIO YA NO SE CACHEA CON @st.cache_resource
+#   Un cliente cacheado a nivel de proceso es UNO SOLO para todos los usuarios
+#   del servidor, y `login()` inicia sesión sobre él: su cabecera Authorization
+#   pasa a ser la del ÚLTIMO usuario que entró. Con la RLS habilitada, cada
+#   consulta se evaluaría con la identidad equivocada — el estudiante A podría
+#   recibir filas autorizadas para el estudiante B.
+#   Por eso el cliente vive en `st.session_state`: uno por sesión de navegador,
+#   con la identidad de quien está conectado.
+#
+#   El cliente de service_role SÍ se cachea: no depende de ninguna identidad de
+#   usuario y solo se usa para administrar cuentas (que exige service_role).
 # ============================================================
-@st.cache_resource
+_ESTADO_PROCESO: dict = {}  # respaldo cuando no hay un ciclo de Streamlit activo
+
+
+def _estado() -> dict:
+    """`st.session_state` si hay ciclo de Streamlit; si no, un diccionario del proceso."""
+    try:
+        return st.session_state
+    except Exception:
+        return _ESTADO_PROCESO
+
+
+def _aplicar_token(cliente: Client, token: str) -> None:
+    """Fija el token del usuario en el cliente.
+
+    supabase-py ya reescribe la cabecera Authorization al emitir SIGNED_IN o
+    TOKEN_REFRESHED, pero se reafirma en cada llamada: si el cliente se recrea
+    (por ejemplo tras un cierre de sesión parcial) las consultas deben seguir
+    viajando con la identidad correcta. Es lo que hace que la RLS evalúe
+    `auth.uid()` con quien está realmente conectado.
+    """
+    if not token:
+        return
+    try:
+        cliente.postgrest.auth(token)
+    except Exception:
+        pass
+
+
 def get_supabase() -> Client:
-    return create_client(SUPABASE_URL, SUPABASE_KEY)
+    """Cliente Supabase DE ESTA SESIÓN (no compartido entre usuarios)."""
+    estado = _estado()
+    cliente = estado.get("_sb_cliente")
+    if cliente is None:
+        cliente = create_client(SUPABASE_URL, SUPABASE_KEY)
+        estado["_sb_cliente"] = cliente
+
+    _aplicar_token(cliente, estado.get("_sb_token", ""))
+    return cliente
 
 
 @st.cache_resource
 def get_supabase_admin() -> Client:
-    """Cliente con service_role — solo para admin.create_user()."""
+    """Cliente con service_role — solo para administrar cuentas.
+
+    SALTA la RLS por diseño, así que no debe usarse para leer datos de usuarios:
+    solo para crear/borrar/restablecer cuentas en Supabase Auth.
+    """
     return create_client(SUPABASE_URL, SUPABASE_SERVICE_KEY)
 
 
@@ -58,6 +109,19 @@ def login(email: str, password: str) -> tuple[bool, str]:
         resp = supabase.auth.sign_in_with_password({"email": email, "password": password})
         user = resp.user
 
+        if resp.session is None:
+            # Ocurre si el correo no está confirmado y el proyecto exige
+            # confirmación: hay usuario pero no sesión utilizable.
+            return False, (
+                "La cuenta existe pero no tiene sesión activa. Es probable que "
+                "el correo no esté confirmado. Contacte al administrador."
+            )
+
+        # Fija la identidad de ESTA sesión antes de consultar: el perfil se lee
+        # con el token del usuario recién conectado, no con la clave del cliente.
+        _estado()["_sb_token"] = resp.session.access_token
+        _aplicar_token(supabase, resp.session.access_token)
+
         perfil_resp = (
             supabase.table("profiles")
             .select("*")
@@ -67,10 +131,11 @@ def login(email: str, password: str) -> tuple[bool, str]:
         )
 
         if not perfil_resp.data:
+            _estado().pop("_sb_token", None)
             return False, "Perfil no encontrado. Contacte al administrador."
 
         perfil = perfil_resp.data
-        st.session_state.usuario = PerfilUsuario(
+        _estado()["usuario"] = PerfilUsuario(
             id=user.id,
             email=user.email,
             nombre=perfil["nombre"],
@@ -216,4 +281,9 @@ def logout():
     for key in ["usuario", "messages", "motor_rag", "pagina_actual",
                 "conversacion_activa", "total_tokens", "costo_total",
                 "asignatura_actual", "grupo_actual"]:
+        st.session_state.pop(key, None)
+
+    # El cliente y el token pertenecen a esta sesión: se descartan para que la
+    # próxima entrada construya uno limpio, sin arrastrar la identidad anterior.
+    for key in ("_sb_cliente", "_sb_token"):
         st.session_state.pop(key, None)
