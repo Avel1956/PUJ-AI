@@ -225,16 +225,46 @@ def _tab_estudiantes(usuario):
         st.info("No hay estudiantes registrados aún.")
         return
 
-    for p in resp.data:
+    # --- Filtro por grupo (solo grupos del propio docente) ---
+    mis_grupos = _grupos_del_docente(usuario.id, supabase, asignatura)
+    grupo_de_est = _mapa_estudiante_grupos(usuario.id, supabase, asignatura, resp.data)
+
+    if mis_grupos:
+        filtro_grp = st.selectbox(
+            "Filtrar por grupo",
+            options=["(Todos)"] + [g["nombre"] for g in mis_grupos] + ["(Sin grupo)"],
+            key="est_filtro_grupo",
+        )
+    else:
+        filtro_grp = "(Todos)"
+
+    if filtro_grp == "(Todos)":
+        visibles = resp.data
+    elif filtro_grp == "(Sin grupo)":
+        visibles = [p for p in resp.data if not grupo_de_est.get(p["id"])]
+    else:
+        visibles = [p for p in resp.data if filtro_grp in grupo_de_est.get(p["id"], [])]
+
+    if not visibles:
+        st.info(f"No hay estudiantes en el filtro **{filtro_grp}**.")
+        return
+
+    st.caption(f"Mostrando **{len(visibles)}** de {len(resp.data)} estudiantes.")
+
+    for p in visibles:
         convs_resp = (
             supabase.table("conversaciones")
             .select("id", count="exact")
             .eq("estudiante_id", p["id"])
+            .eq("asignatura", asignatura)
             .execute()
         )
         n_convs = convs_resp.count if hasattr(convs_resp, "count") else 0
 
-        with st.expander(f"🧑 {p['nombre']} — {p['email']} — {n_convs} conversaciones"):
+        grupos_de_p = grupo_de_est.get(p["id"], [])
+        grupos_txt = f" — 👥 {', '.join(grupos_de_p)}" if grupos_de_p else ""
+
+        with st.expander(f"🧑 {p['nombre']} — {p['email']} — {n_convs} conversaciones{grupos_txt}"):
             st.caption(f"Registrado: {p.get('created_at', '?')}")
             col1, col2, col3 = st.columns(3)
             with col1:
@@ -244,7 +274,7 @@ def _tab_estudiantes(usuario):
                     st.rerun()
             with col2:
                 if st.button("📥 Descargar JSONL", key=f"dl_est_{p['id']}"):
-                    jsonl = _generar_jsonl_estudiante(p["id"], p["nombre"])
+                    jsonl = _generar_jsonl_estudiante(p["id"], p["nombre"], usuario.id)
                     _ofrecer_descarga(jsonl, f"conversaciones_{p['nombre'].replace(' ', '_')}.jsonl")
             with col3:
                 if st.button("🗑️ Eliminar", key=f"del_est_{p['id']}", type="secondary"):
@@ -423,7 +453,7 @@ def _tab_grupos(usuario):
                     st.rerun()
             with col2:
                 if st.button("📥 Descargar JSONL", key=f"dl_grp_{g['id']}"):
-                    jsonl = _generar_jsonl_grupo(g["id"], g["nombre"])
+                    jsonl = _generar_jsonl_grupo(g["id"], g["nombre"], usuario.id)
                     _ofrecer_descarga(jsonl, f"grupo_{g['nombre'].replace(' ', '_')}.jsonl")
             with col3:
                 if st.button("🗑️ Eliminar grupo", key=f"del_grp_{g['id']}", type="secondary"):
@@ -432,7 +462,7 @@ def _tab_grupos(usuario):
                 _confirmar_y_borrar(
                     f"cf_doc_grp_{g['id']}",
                     f"¿Eliminar el grupo '{g['nombre']}' y desvincular a {len(nombres_m)} miembros?",
-                    lambda gid=g["id"]: _borrar_grupo(gid),
+                    lambda gid=g["id"]: _borrar_grupo(gid, usuario.id),
                 )
 
             # Quitar miembro
@@ -463,23 +493,66 @@ def _tab_tracking(usuario):
 
     asignatura_deploy = _asignatura_unica()
 
-    # Filtros
-    col1, col2 = st.columns(2)
-    with col1:
-        mis_estudiantes = _estudiantes_del_docente(usuario.id, supabase, asignatura_deploy)
-        mapa_est = {e["nombre"]: e["id"] for e in mis_estudiantes}
-        if not mapa_est:
-            st.info("👥 Aún no tienes grupos con estudiantes. Crea un grupo en la pestaña **👥 Grupos** para hacer seguimiento.")
-            return
+    # ── Filtros ───────────────────────────────────────────────────────────
+    # REGLA: nunca se consulta `conversaciones` sin acotarla a los estudiantes
+    # del docente. Los filtros de grupo/estudiante solo pueden REDUCIR ese
+    # conjunto, jamás ampliarlo.
+    mis_estudiantes = _estudiantes_del_docente(usuario.id, supabase, asignatura_deploy)
+    mis_est_ids = [e["id"] for e in mis_estudiantes]
 
+    if not mis_est_ids:
+        st.info(
+            "👥 Aún no tienes estudiantes en este curso. Créelos en la pestaña "
+            "**👥 Estudiantes** para hacer seguimiento."
+        )
+        return
+
+    mapa_est_todos = {e["nombre"]: e["id"] for e in mis_estudiantes}
+    mis_grupos = _grupos_del_docente(usuario.id, supabase, asignatura_deploy)
+    mapa_grp = {g["nombre"]: g for g in mis_grupos}
+
+    # Navegación cruzada desde el botón "📊 Ver conversaciones" de un grupo
+    grupo_nav = st.session_state.pop("_tracking_grupo", None)
+    st.session_state.pop("_tracking_tipo", None)
+    if grupo_nav:
+        for nombre_g, g in mapa_grp.items():
+            if g["id"] == grupo_nav:
+                st.session_state["tracking_grupo"] = nombre_g
+                st.session_state.pop("tracking_estudiante", None)
+                break
+
+    col1, col2 = st.columns(2)
+
+    with col1:
+        if mapa_grp:
+            grupo_sel = st.selectbox(
+                "Filtrar por grupo",
+                options=["(Todos)"] + list(mapa_grp.keys()),
+                key="tracking_grupo",
+            )
+        else:
+            grupo_sel = "(Todos)"
+
+    # Conjunto visible = grupo elegido ∩ estudiantes del docente
+    if grupo_sel != "(Todos)":
+        miembros = _miembros_del_grupo(mapa_grp[grupo_sel]["id"], supabase)
+        ids_visibles = [m["id"] for m in miembros if m["id"] in set(mis_est_ids)]
+        mapa_est = {m["nombre"]: m["id"] for m in miembros if m["id"] in set(ids_visibles)}
+    else:
+        ids_visibles = list(mis_est_ids)
+        mapa_est = dict(mapa_est_todos)
+
+    if not ids_visibles:
+        st.info(f"El grupo **{grupo_sel}** no tiene estudiantes asignados.")
+        return
+
+    with col1:
         # Determinar estudiante por defecto (desde navegación cruzada)
         default_idx = 0
-        if "_tracking_estudiante" in st.session_state:
-            nombre_track = st.session_state.get("_tracking_nombre", "")
-            if nombre_track in mapa_est:
-                default_idx = list(mapa_est.keys()).index(nombre_track) + 1
-            del st.session_state._tracking_estudiante
-            del st.session_state._tracking_nombre
+        st.session_state.pop("_tracking_estudiante", None)
+        nombre_track = st.session_state.pop("_tracking_nombre", "")
+        if nombre_track and nombre_track in mapa_est:
+            default_idx = list(mapa_est.keys()).index(nombre_track) + 1
 
         estudiante_sel = st.selectbox(
             "Seleccionar estudiante",
@@ -487,14 +560,20 @@ def _tab_tracking(usuario):
             index=default_idx,
             key="tracking_estudiante",
         )
+
     with col2:
         if asignatura_deploy:
             st.caption(f"📖 Curso: **{GestorAsignaturas.nombre_legible(asignatura_deploy)}**")
             asignatura_sel = asignatura_deploy
         else:
-            asignaturas_resp = supabase.table("conversaciones").select("asignatura").execute()
+            asigs_resp = (
+                supabase.table("conversaciones")
+                .select("asignatura")
+                .in_("estudiante_id", mis_est_ids)
+                .execute()
+            )
             asigs = sorted(set(
-                c["asignatura"] for c in (asignaturas_resp.data or []) if c["asignatura"]
+                c["asignatura"] for c in (asigs_resp.data or []) if c["asignatura"]
             ))
             asignatura_sel = st.selectbox(
                 "Filtrar por asignatura",
@@ -502,10 +581,17 @@ def _tab_tracking(usuario):
                 key="tracking_asignatura",
             )
 
-    # Construir query
-    query = supabase.table("conversaciones").select("*")
+    # ── Construcción de la consulta (siempre acotada al docente) ──────────
     if estudiante_sel != "(Todos)":
-        query = query.eq("estudiante_id", mapa_est[estudiante_sel])
+        ids_consulta = [mapa_est[estudiante_sel]]
+    else:
+        ids_consulta = ids_visibles
+
+    query = (
+        supabase.table("conversaciones")
+        .select("*")
+        .in_("estudiante_id", ids_consulta)
+    )
     if asignatura_sel != "(Todas)":
         query = query.eq("asignatura", asignatura_sel)
 
@@ -521,7 +607,7 @@ def _tab_tracking(usuario):
         with col_dl:
             if estudiante_sel != "(Todos)":
                 if st.button(f"📥 Descargar todas las de {estudiante_sel} (JSONL)", key="dl_tracking_estudiante"):
-                    jsonl = _generar_jsonl_estudiante(mapa_est[estudiante_sel], estudiante_sel)
+                    jsonl = _generar_jsonl_estudiante(mapa_est[estudiante_sel], estudiante_sel, usuario.id)
                     _ofrecer_descarga(jsonl, f"conversaciones_{estudiante_sel.replace(' ', '_')}.jsonl")
             else:
                 if st.button("📥 Descargar TODO lo visible (JSONL)", key="dl_tracking_todo"):
@@ -589,7 +675,7 @@ def _tab_tracking(usuario):
                 _confirmar_y_borrar(
                     f"cf_doc_conv_{conv['id']}",
                     f"¿Eliminar conversación de {nombre_est} ({conv['asignatura']}, {n_mensajes} mensajes)?",
-                    lambda cid=conv["id"]: _borrar_conversacion(cid),
+                    lambda cid=conv["id"]: _borrar_conversacion(cid, usuario.id),
                 )
 
 
@@ -610,16 +696,39 @@ def _tab_mensajes(usuario):
     col1, col2 = st.columns(2)
     with col1:
         if destino_tipo == "Estudiante individual":
-            estudiantes = (
-                supabase.table("profiles")
-                .select("id, nombre")
-                .eq("rol", "estudiante")
-                .order("nombre")
-                .execute()
-            )
-            mapa_est = {p["nombre"]: p for p in (estudiantes.data or [])}
-            destino_sel = st.selectbox("Estudiante", options=list(mapa_est.keys()), key="msg_destino_estudiante")
-            estudiante_id = mapa_est[destino_sel]["id"] if destino_sel in mapa_est else None
+            asignatura_deploy = _asignatura_unica()
+            mis_estudiantes = _estudiantes_del_docente(usuario.id, supabase, asignatura_deploy)
+            mapa_grp_msg = {
+                g["nombre"]: g
+                for g in _grupos_del_docente(usuario.id, supabase, asignatura_deploy)
+            }
+
+            if mapa_grp_msg:
+                filtro_g = st.selectbox(
+                    "Filtrar por grupo",
+                    options=["(Todos)"] + list(mapa_grp_msg.keys()),
+                    key="msg_filtro_grupo",
+                )
+                if filtro_g != "(Todos)":
+                    ids_g = {
+                        m["id"]
+                        for m in _miembros_del_grupo(mapa_grp_msg[filtro_g]["id"], supabase)
+                    }
+                    mis_estudiantes = [e for e in mis_estudiantes if e["id"] in ids_g]
+
+            mapa_est = {p["nombre"]: p for p in mis_estudiantes}
+            if mapa_est:
+                destino_sel = st.selectbox(
+                    "Estudiante", options=list(mapa_est.keys()), key="msg_destino_estudiante"
+                )
+                estudiante_id = mapa_est[destino_sel]["id"] if destino_sel in mapa_est else None
+            else:
+                st.info(
+                    "No tiene estudiantes propios en este filtro. Créelos en la pestaña "
+                    "**👥 Estudiantes**."
+                )
+                destino_sel = ""
+                estudiante_id = None
             grupo_id = None
         else:
             grupos = (
@@ -713,7 +822,7 @@ def _tab_descargas(usuario):
         est_nombre = st.selectbox("Estudiante", options=["(Seleccionar)"] + list(mapa_est.keys()), key="dl_estudiante")
         if est_nombre != "(Seleccionar)" and st.button("📥 Descargar JSONL", key="btn_dl_estudiante", use_container_width=True):
             est = mapa_est[est_nombre]
-            jsonl = _generar_jsonl_estudiante(est["id"], est_nombre)
+            jsonl = _generar_jsonl_estudiante(est["id"], est_nombre, usuario.id)
             _ofrecer_descarga(jsonl, f"conversaciones_{est_nombre.replace(' ', '_')}.jsonl")
 
     with col2:
@@ -721,7 +830,7 @@ def _tab_descargas(usuario):
         grp_nombre = st.selectbox("Grupo", options=["(Seleccionar)"] + list(mapa_grp.keys()), key="dl_grupo")
         if grp_nombre != "(Seleccionar)" and st.button("📥 Descargar JSONL", key="btn_dl_grupo", use_container_width=True):
             grp = mapa_grp[grp_nombre]
-            jsonl = _generar_jsonl_grupo(grp["id"], grp_nombre)
+            jsonl = _generar_jsonl_grupo(grp["id"], grp_nombre, usuario.id)
             _ofrecer_descarga(jsonl, f"grupo_{grp_nombre.replace(' ', '_')}.jsonl")
 
     with col3:
@@ -773,23 +882,30 @@ def _tab_descargas(usuario):
                 mime="text/csv",
             )
         else:
-            # Generar desde DB (sin passwords — no se almacenan)
+            # Generar desde DB (sin passwords — no se almacenan).
+            # Acotado al docente y al curso: nunca lista estudiantes ajenos.
             supabase = get_supabase()
-            est_resp = (
+            est_q = (
                 supabase.table("profiles")
-                .select("nombre, email, created_at")
+                .select("id, nombre, email, created_at")
                 .eq("rol", "estudiante")
-                .order("nombre")
-                .execute()
+                .eq("creado_por", usuario.id)
             )
+            if asignatura_deploy:
+                est_q = est_q.eq("asignatura", asignatura_deploy)
+            est_resp = est_q.order("nombre").execute()
             if est_resp.data:
+                grupo_de_est = _mapa_estudiante_grupos(
+                    usuario.id, supabase, asignatura_deploy, est_resp.data
+                )
                 csv_buf = io.StringIO()
                 writer = csv.writer(csv_buf)
-                writer.writerow(["nombre", "email", "password", "fecha_registro"])
+                writer.writerow(["nombre", "email", "password", "grupo", "fecha_registro"])
                 for e in est_resp.data:
                     writer.writerow([
                         e["nombre"], e["email"],
                         "— (solo disponible al crear)",
+                        ", ".join(grupo_de_est.get(e["id"], [])),
                         e.get("created_at", "")[:10] if e.get("created_at") else "",
                     ])
                 st.download_button(
@@ -800,7 +916,7 @@ def _tab_descargas(usuario):
                 )
                 st.caption("💡 Las contraseñas solo se muestran al crear los estudiantes. Para estudiantes ya existentes, use 'Restablecer contraseña'.")
             else:
-                st.info("No hay estudiantes registrados.")
+                st.info("No hay estudiantes registrados en este curso.")
 
     # --- Lista de grupos con estudiantes ---
     st.divider()
@@ -863,9 +979,65 @@ def _estudiantes_del_docente(docente_id: str, supabase, asignatura: str = "") ->
     return [{"id": p["id"], "nombre": p.get("nombre", "?")} for p in (resp.data or [])]
 
 
-def _generar_jsonl_estudiante(estudiante_id: str, nombre: str) -> str:
+def _grupos_del_docente(docente_id: str, supabase, asignatura: str = "") -> list[dict]:
+    """Grupos creados por el docente (opcionalmente acotados a un curso).
+
+    Nunca devuelve grupos de otros docentes: el filtro `creado_por` es
+    obligatorio, no opcional.
+    """
+    if not docente_id:
+        return []
+    query = (
+        supabase.table("grupos")
+        .select("id, nombre, asignatura")
+        .eq("creado_por", docente_id)
+    )
+    if asignatura:
+        query = query.eq("asignatura", asignatura)
+    resp = query.order("nombre").execute()
+    return resp.data or []
+
+
+def _miembros_del_grupo(grupo_id: str, supabase) -> list[dict]:
+    """IDs y nombres de los estudiantes que pertenecen a un grupo."""
+    if not grupo_id:
+        return []
+    resp = (
+        supabase.table("grupos_estudiantes")
+        .select("estudiante_id, profiles!estudiante_id(nombre)")
+        .eq("grupo_id", grupo_id)
+        .execute()
+    )
+    miembros = []
+    for row in (resp.data or []):
+        perfil = row.get("profiles") or {}
+        miembros.append({
+            "id": row.get("estudiante_id", ""),
+            "nombre": perfil.get("nombre", "?") if isinstance(perfil, dict) else "?",
+        })
+    return [m for m in miembros if m["id"]]
+
+
+def _mapa_estudiante_grupos(docente_id: str, supabase, asignatura: str,
+                            estudiantes: list[dict]) -> dict[str, list[str]]:
+    """Devuelve {estudiante_id: [nombres de grupo]} para los grupos del docente."""
+    mapa: dict[str, list[str]] = {e["id"]: [] for e in estudiantes}
+    for g in _grupos_del_docente(docente_id, supabase, asignatura):
+        for m in _miembros_del_grupo(g["id"], supabase):
+            if m["id"] in mapa:
+                mapa[m["id"]].append(g["nombre"])
+    return mapa
+
+
+def _generar_jsonl_estudiante(estudiante_id: str, nombre: str, docente_id: str = "") -> str:
     """Genera JSONL con todas las conversaciones de un estudiante."""
     supabase = get_supabase()
+
+    if docente_id:
+        p = supabase.table("profiles").select("creado_por").eq("id", estudiante_id).single().execute()
+        if not p.data or p.data.get("creado_por") != docente_id:
+            raise PermissionError("No tiene permiso para exportar este estudiante.")
+
     convs = (
         supabase.table("conversaciones")
         .select("id, asignatura, titulo, created_at, activa")
@@ -901,9 +1073,15 @@ def _generar_jsonl_estudiante(estudiante_id: str, nombre: str) -> str:
     return "\n".join(lineas)
 
 
-def _generar_jsonl_grupo(grupo_id: str, nombre_grupo: str) -> str:
+def _generar_jsonl_grupo(grupo_id: str, nombre_grupo: str, docente_id: str = "") -> str:
     """Genera JSONL con todas las conversaciones de los miembros de un grupo."""
     supabase = get_supabase()
+
+    if docente_id:
+        g = supabase.table("grupos").select("creado_por").eq("id", grupo_id).single().execute()
+        if not g.data or g.data.get("creado_por") != docente_id:
+            raise PermissionError("No tiene permiso para exportar este grupo.")
+
     miembros = (
         supabase.table("grupos_estudiantes")
         .select("estudiante_id, profiles!estudiante_id(nombre)")
@@ -1120,14 +1298,32 @@ def _confirmar_y_borrar(confirm_key: str, mensaje: str, accion):
             st.rerun()
 
 
-def _borrar_grupo(grupo_id: str):
+def _borrar_grupo(grupo_id: str, docente_id: str = ""):
+    """Borra un grupo y sus membresías (solo si pertenece al docente)."""
     supabase = get_supabase()
+
+    if docente_id:
+        g = supabase.table("grupos").select("creado_por").eq("id", grupo_id).single().execute()
+        if not g.data or g.data.get("creado_por") != docente_id:
+            raise PermissionError("No tiene permiso para borrar este grupo.")
+
     supabase.table("grupos_estudiantes").delete().eq("grupo_id", grupo_id).execute()
     supabase.table("grupos").delete().eq("id", grupo_id).execute()
 
 
-def _borrar_conversacion(conv_id: str):
+def _borrar_conversacion(conv_id: str, docente_id: str = ""):
+    """Borra una conversación y sus mensajes (solo si el estudiante es del docente)."""
     supabase = get_supabase()
+
+    if docente_id:
+        c = supabase.table("conversaciones").select("estudiante_id").eq("id", conv_id).single().execute()
+        est_id = c.data.get("estudiante_id") if c.data else None
+        if not est_id:
+            raise PermissionError("No se encontró la conversación.")
+        p = supabase.table("profiles").select("creado_por").eq("id", est_id).single().execute()
+        if not p.data or p.data.get("creado_por") != docente_id:
+            raise PermissionError("No tiene permiso para borrar esta conversación.")
+
     supabase.table("mensajes").delete().eq("conversacion_id", conv_id).execute()
     supabase.table("conversaciones").delete().eq("id", conv_id).execute()
 
@@ -1137,10 +1333,14 @@ def _borrar_estudiante(estudiante_id: str, docente_id: str = ""):
     supabase = get_supabase()
     supabase_admin = get_supabase_admin()
 
-    # Verificación de pertenencia (defensa en profundidad)
+    # Verificación de pertenencia (defensa en profundidad).
+    # Se exige coincidencia EXACTA: un estudiante huérfano (creado_por NULL)
+    # tampoco es borrable por un docente.
     if docente_id:
         perfil = supabase.table("profiles").select("creado_por").eq("id", estudiante_id).single().execute()
-        if perfil.data and perfil.data.get("creado_por") and perfil.data["creado_por"] != docente_id:
+        if not perfil.data:
+            raise PermissionError("No se encontró el estudiante.")
+        if perfil.data.get("creado_por") != docente_id:
             raise PermissionError("No tiene permiso para borrar este estudiante.")
 
     # Borrar mensajes de todas sus conversaciones
