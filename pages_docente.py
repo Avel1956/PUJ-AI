@@ -1202,17 +1202,28 @@ def _generar_jsonl_docente(docente_id: str, asignatura: str = "") -> str:
 
 
 def _generar_jsonl_asignatura(asignatura: str, docente_id: str = "") -> str:
-    """Genera JSONL para una asignatura específica."""
+    """Genera JSONL para una asignatura específica.
+
+    Con `docente_id` la consulta se acota EN SQL a los estudiantes de ese
+    docente (antes se traían todas las conversaciones del curso y se
+    descartaban en Python). Sin `docente_id` —exportación del admin— se
+    exporta el curso completo, que es lo intencional.
+    """
     supabase = get_supabase()
     estudiantes = _estudiantes_del_docente(docente_id, supabase) if docente_id else None
-    est_ids = set(e["id"] for e in estudiantes) if estudiantes else None
-    convs = (
+    est_ids = {e["id"] for e in estudiantes} if estudiantes else None
+
+    if est_ids is not None and not est_ids:
+        # El docente no tiene estudiantes en ese curso: nada que exportar.
+        return _linea_metadata(extra={"asignatura": asignatura, "docente_id": docente_id})
+
+    consulta = (
         supabase.table("conversaciones")
         .select("id, estudiante_id, asignatura, titulo, created_at, activa")
-        .eq("asignatura", asignatura)
-        .order("created_at")
-        .execute()
     )
+    if est_ids is not None:
+        consulta = consulta.in_("estudiante_id", list(est_ids))
+    convs = consulta.eq("asignatura", asignatura).order("created_at").execute()
     lineas = [_linea_metadata(extra={"asignatura": asignatura, "docente_id": docente_id})]
     est_cache = {}
     for conv in (convs.data or []):
