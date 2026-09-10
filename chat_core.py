@@ -45,15 +45,40 @@ def get_modelo_activo() -> str:
 def inicializar_motor_rag(asignatura: str) -> MotorRAG:
     """Crea e indexa el MotorRAG para una asignatura, con cache en session_state."""
     cache_key = f"_rag_{asignatura}"
-    if cache_key in st.session_state:
-        return st.session_state[cache_key]
-    with st.spinner("📚 Cargando documentos del curso..."):
-        motor = MotorRAG(asignatura)
-        motor.indexar()
-        st.session_state[cache_key] = motor
+    motor = st.session_state.get(cache_key)
+    if motor is None:
+        with st.spinner("📚 Cargando documentos del curso..."):
+            motor = MotorRAG(asignatura)
+            motor.indexar()
+            st.session_state[cache_key] = motor
         if motor.esta_listo():
             st.toast(f"✅ {len(motor.documents)} documentos cargados")
+    _avisar_estado_rag(motor, asignatura)
     return motor
+
+
+def _avisar_estado_rag(motor: MotorRAG, asignatura: str) -> None:
+    """Avisa cuando el curso no tiene material indexado o hay archivos ilegibles.
+
+    Antes, un curso sin documentos producía un tutor sin RAG y sin ningún
+    aviso: el chat funcionaba igual, simplemente sin el material del curso.
+    """
+    clave_aviso = f"_rag_avisado_{asignatura}"
+    if st.session_state.get(clave_aviso):
+        return
+    st.session_state[clave_aviso] = True
+
+    if not motor.esta_listo():
+        st.warning(
+            f"⚠️ El curso `{asignatura}` no tiene documentos indexados. El tutor "
+            "responderá con su conocimiento general, sin apoyarse en el material "
+            f"del curso. Cargue archivos en `asignaturas/{asignatura}/documentos/`."
+        )
+
+    if getattr(motor, "archivos_ignorados", None):
+        with st.expander(f"⚠️ {len(motor.archivos_ignorados)} archivo(s) del curso no se pudieron leer"):
+            for archivo in motor.archivos_ignorados:
+                st.caption(f"- {archivo}")
 
 
 def _construir_llm(info_modelo: dict):
