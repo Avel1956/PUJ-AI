@@ -1,4 +1,7 @@
 """auth.py — Supabase Auth con 3 roles (estudiante, docente, admin)."""
+import random
+import string
+
 import streamlit as st
 from supabase import create_client, Client
 
@@ -153,6 +156,54 @@ def crear_usuario_estudiante(email: str, password: str, nombre: str,
             },
         })
         return True, f"Estudiante {nombre} creado (cuenta: {email_efectivo})."
+    except Exception as e:
+        return False, str(e)[:200]
+
+
+def generar_password(length: int = 10) -> str:
+    """Genera una contraseña aleatoria alfanumérica fácil de transcribir.
+
+    Excluye los caracteres confundibles (0, O, 1, I, l) porque estas claves
+    se entregan a los estudiantes en papel o por mensaje.
+    """
+    chars = "".join(c for c in string.ascii_letters + string.digits if c not in "0O1Il")
+    return "".join(random.choice(chars) for _ in range(length))
+
+
+def restablecer_password(usuario_id: str, nueva_password: str = "",
+                         docente_id: str = "") -> tuple[bool, str]:
+    """Asigna una contraseña nueva a una cuenta. Requiere service_role.
+
+    Las contraseñas se guardan en Supabase Auth solo como hash bcrypt, así que
+    NO son recuperables: la única forma de desbloquear a un usuario es
+    sobrescribirlas, que es lo que hace esta función.
+
+    Si `docente_id` se especifica, exige que la cuenta le pertenezca
+    (`profiles.creado_por == docente_id`). Una cuenta huérfana (creado_por
+    NULL) tampoco es restablecible por un docente.
+
+    Devuelve (éxito, mensaje). Si tuvo éxito, el mensaje ES la contraseña.
+    """
+    try:
+        supabase = get_supabase_admin()
+
+        if docente_id:
+            perfil = (
+                supabase.table("profiles")
+                .select("creado_por")
+                .eq("id", usuario_id)
+                .single()
+                .execute()
+            )
+            if not perfil.data:
+                return False, "La cuenta no existe."
+            if perfil.data.get("creado_por") != docente_id:
+                return False, "No tiene permiso sobre esta cuenta."
+
+        clave = nueva_password or generar_password()
+        supabase.auth.admin.update_user_by_id(usuario_id, {"password": clave})
+        return True, clave
+
     except Exception as e:
         return False, str(e)[:200]
 
