@@ -7,19 +7,36 @@ from langchain_openai import ChatOpenAI
 from langchain_core.messages import HumanMessage, AIMessage, SystemMessage
 
 from auth import get_supabase
-from config import MODELOS_DISPONIBLES, MODELO_POR_DEFECTO
+from config import (
+    MODELOS_DISPONIBLES,
+    MODELO_POR_DEFECTO,
+    DEEPSEEK_THINKING,
+    MAX_TOKENS_RESPUESTA,
+    tarifa_por_1k,
+)
 from prompts import construir_prompt_completo
 from rag_engine import MotorRAG
 from telemetry import registrar_log
 
 
 def get_modelo_activo() -> str:
-    """Devuelve el modelo LLM configurado por el admin, o el default."""
+    """Devuelve el modelo LLM configurado por el admin, o el default.
+
+    Si la base guarda una clave que ya no existe en MODELOS_DISPONIBLES (por
+    ejemplo un modelo retirado), se avisa en lugar de degradar en silencio.
+    """
     try:
         supabase = get_supabase()
         resp = supabase.table("config_sistema").select("valor").eq("clave", "modelo_llm").single().execute()
         if resp.data:
-            return resp.data["valor"]
+            valor = (resp.data.get("valor") or "").strip()
+            if valor in MODELOS_DISPONIBLES:
+                return valor
+            st.warning(
+                f"⚠️ El modelo configurado (`{valor}`) ya no existe en "
+                f"`MODELOS_DISPONIBLES`. Se usará `{MODELO_POR_DEFECTO}`. "
+                "Actualícelo en el panel de administración."
+            )
     except Exception:
         pass
     return MODELO_POR_DEFECTO
@@ -39,12 +56,13 @@ def inicializar_motor_rag(asignatura: str) -> MotorRAG:
     return motor
 
 
-def responder(prompt: str, motor: MotorRAG, asignatura: str, usuario, control=None) -> str:
-    """Genera respuesta del tutor socrático. Retorna el contenido de la respuesta."""
-    modelo_nombre = get_modelo_activo()
-    info_modelo = MODELOS_DISPONIBLES.get(modelo_nombre, MODELOS_DISPONIBLES[MODELO_POR_DEFECTO])
+def _construir_llm(info_modelo: dict):
+    """Crea el cliente LLM para el modelo indicado.
 
-    # Configurar LLM
+    Aísla aquí la elección de proveedor y el control del modo "thinking" de
+    DeepSeek, que viene activado por defecto en la API y hay que desactivar
+    explícitamente (ver DEEPSEEK_THINKING en config.py).
+    """
     if info_modelo["provider"] == "openrouter":
         api_key = st.secrets["OPENROUTER_API_KEY"]
         base_url = "https://openrouter.ai/api/v1"
@@ -54,14 +72,35 @@ def responder(prompt: str, motor: MotorRAG, asignatura: str, usuario, control=No
         base_url = "https://api.deepseek.com"
         default_headers = None
 
-    llm = ChatOpenAI(
-        model=info_modelo["model_id"],
-        api_key=api_key,
-        base_url=base_url,
-        temperature=0.7,
-        max_tokens=2048,
-        default_headers=default_headers,
-    )
+    kwargs = {
+        "model": info_modelo["model_id"],
+        "api_key": api_key,
+        "base_url": base_url,
+        "temperature": 0.7,
+        "max_tokens": MAX_TOKENS_RESPUESTA,
+        "default_headers": default_headers,
+    }
+
+    if info_modelo["provider"] == "deepseek":
+        kwargs["extra_body"] = {
+            "thinking": {"type": "enabled" if DEEPSEEK_THINKING else "disabled"}
+        }
+
+    try:
+        return ChatOpenAI(**kwargs)
+    except TypeError:
+        # Versión de langchain-openai sin soporte para `extra_body`:
+        # se continúa sin ese parámetro en lugar de romper el chat.
+        kwargs.pop("extra_body", None)
+        return ChatOpenAI(**kwargs)
+
+
+def responder(prompt: str, motor: MotorRAG, asignatura: str, usuario, control=None) -> str:
+    """Genera respuesta del tutor socrático. Retorna el contenido de la respuesta."""
+    modelo_nombre = get_modelo_activo()
+    info_modelo = MODELOS_DISPONIBLES.get(modelo_nombre, MODELOS_DISPONIBLES[MODELO_POR_DEFECTO])
+
+    llm = _construir_llm(info_modelo)
 
     # RAG (protegido)
     fragmentos = []
@@ -108,7 +147,8 @@ def responder(prompt: str, motor: MotorRAG, asignatura: str, usuario, control=No
     st.session_state.setdefault("costo_total", 0.0)
     t_in = respuesta.usage_metadata.get("input_tokens", 0) if hasattr(respuesta, "usage_metadata") else 0
     t_out = respuesta.usage_metadata.get("output_tokens", 0) if hasattr(respuesta, "usage_metadata") else 0
-    costo = (t_in * info_modelo["input_cost"] + t_out * info_modelo["output_cost"]) / 1000
+    c_in, c_out = tarifa_por_1k(info_modelo)
+    costo = (t_in * c_in + t_out * c_out) / 1000
     st.session_state.total_tokens += t_in + t_out
     st.session_state.costo_total += costo
     st.caption(f"Tokens: {t_in}→{t_out} | Costo: ${costo:.4f} | Modelo: {modelo_nombre}")
