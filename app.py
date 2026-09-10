@@ -145,8 +145,9 @@ def _render_login_page():
     st.markdown("")
     with st.expander("ℹ️ ¿Olvidaste tu contraseña?"):
         st.markdown(
-            "Comunícate con tu profesor para restablecerla. "
-            "Los docentes pueden crear nuevas credenciales desde su panel de administración."
+            "Comunícate con tu profesor. Las contraseñas se guardan cifradas y "
+            "no es posible consultarlas, pero tu profesor puede asignarte una "
+            "nueva desde su panel: pestaña **👥 Estudiantes → 🔑 Restablecer contraseña**."
         )
 
 
